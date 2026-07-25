@@ -1,16 +1,15 @@
 import { SymbolView } from 'expo-symbols';
 import { Tabs } from 'expo-router';
-import { useColorScheme } from 'react-native';
 
 import Colors from '@/constants/Colors';
 
 export default function TabLayout() {
-  const colorScheme = useColorScheme() === 'dark' ? 'dark' : 'light';
-
   return (
     <Tabs
       screenOptions={{
-        tabBarActiveTintColor: Colors[colorScheme].tint,
+        // v0.1 screens are only styled for a light background, so the tab
+        // bar stays in light mode regardless of the system appearance setting.
+        tabBarActiveTintColor: Colors.light.tint,
       }}>
       <Tabs.Screen
         name="index"

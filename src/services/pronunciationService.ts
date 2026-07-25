@@ -9,6 +9,10 @@ const LEARNING_SPEECH_RATE = 0.85;
 
 let preferredVoicePromise: Promise<Voice | null> | null = null;
 
+// Guards against overlapping calls: only the request holding the current
+// highest id is allowed to stop/start playback once its async work resolves.
+let latestRequestId = 0;
+
 function pickPreferredVoice(voices: Voice[]): Voice | null {
   for (const language of PREFERRED_LANGUAGES) {
     const matches = voices.filter(
@@ -36,20 +40,32 @@ async function resolvePreferredVoice(): Promise<Voice | null> {
  * Speaks an English word or phrase aloud, preferring en-NZ/AU/GB/US system
  * voices in that order. Stops any in-progress speech first so calls never
  * queue up, and never throws — playback failures are logged and swallowed.
+ *
+ * If this is called again before the previous call's voice lookup resolves,
+ * only the most recent call is allowed to actually stop/start playback, so
+ * rapid repeated taps end up playing just the last word requested.
  */
 export async function playPronunciation(text: string): Promise<void> {
   if (!text) {
     return;
   }
 
-  try {
-    await Speech.stop();
-  } catch {
-    // Nothing was playing; safe to ignore.
-  }
+  const requestId = ++latestRequestId;
 
   try {
     const voice = await resolvePreferredVoice();
+
+    if (requestId !== latestRequestId) {
+      // A newer request started while we were resolving the voice; drop this one.
+      return;
+    }
+
+    await Speech.stop();
+
+    if (requestId !== latestRequestId) {
+      // A newer request started while we were stopping playback; drop this one.
+      return;
+    }
 
     Speech.speak(text, {
       rate: LEARNING_SPEECH_RATE,

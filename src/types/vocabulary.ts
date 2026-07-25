@@ -31,6 +31,8 @@ export interface UserWordProgress {
   status: LearningStatus;
   familiarity: Familiarity;
   reviewCount: number;
+  /** Consecutive "known" streak, capped at 3; reaching 3 marks the word mastered. */
+  recognitionCount: number;
   lastReviewedAt?: string;
   nextReviewAt?: string;
 }
