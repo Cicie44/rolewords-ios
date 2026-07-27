@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx --version)",
+      "Bash(npx --yes create-expo-app@latest --help)"
+    ]
+  }
+}
