@@ -1,10 +1,26 @@
 import { useFocusEffect } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { sampleVocabulary } from '@/src/data/sampleVocabulary';
 import { wordBooks } from '@/src/data/wordBooks';
+import {
+  LEARN_TARGET_COMPLETED,
+  MAX_RECOGNITION_COUNT,
+  REVIEW_GROUP_SIZE,
+} from '@/src/features/learning/constants';
+import { createLearnSession, applyLearnAnswer } from '@/src/features/learning/learnSession';
+import { createReviewSession, applyReviewAnswer, isReviewSessionComplete } from '@/src/features/learning/reviewSession';
+import {
+  compareByReviewUrgency,
+  computeNextReviewAt,
+  isDueForReview,
+  isEligibleForReview,
+  isNewWord,
+  nextLearningStatus,
+  nextRecognitionCount,
+} from '@/src/features/learning/reviewSchedule';
 import { useAuth } from '@/src/providers/AuthProvider';
 import { playPronunciation } from '@/src/services/pronunciationService';
 import {
@@ -16,68 +32,12 @@ import {
   deleteWordProgress,
   fetchWordProgress,
   saveWordProgress,
-  type ProgressByItemId,
 } from '@/src/services/wordProgressService';
 import type { SavedItem, SavedItemType } from '@/src/types/savedItem';
-import type { Familiarity, LearningStatus, UserWordProgress } from '@/src/types/vocabulary';
-
-const MAX_RECOGNITION_COUNT = 3;
+import type { Familiarity, UserWordProgress, VocabularyItem } from '@/src/types/vocabulary';
+import type { LearnSession, ReviewSession, ScreenMode } from '@/src/types/learningSession';
 
 const vocabularyById = new Map(sampleVocabulary.map((item) => [item.id, item]));
-
-type WordBookSession = {
-  queue: string[];
-  reviewSequence: number;
-  unknownCount: number;
-  fuzzyCount: number;
-  knownCount: number;
-};
-
-function createInitialSession(wordIds: string[]): WordBookSession {
-  return {
-    queue: [...wordIds],
-    reviewSequence: 0,
-    unknownCount: 0,
-    fuzzyCount: 0,
-    knownCount: 0,
-  };
-}
-
-// Rebuilds a fresh session for every word book from remote progress: mastered
-// words are left out of the queue, everything else keeps sampleVocabulary's
-// original order. Per-round counters always restart at zero.
-function buildInitialSessionsFromProgress(
-  progressByItemId: ProgressByItemId,
-): Record<string, WordBookSession> {
-  const sessions: Record<string, WordBookSession> = {};
-
-  for (const book of wordBooks) {
-    const idsInBook = sampleVocabulary
-      .filter((item) => item.wordBookId === book.id)
-      .map((item) => item.id);
-    const queue = idsInBook.filter((id) => progressByItemId[id]?.status !== 'mastered');
-    sessions[book.id] = createInitialSession(queue);
-  }
-
-  return sessions;
-}
-
-// Inserts wordId into queue after `numberOfOtherWords` other words, clamped
-// to the end of the queue if there aren't that many words left.
-function insertAfter(queue: string[], wordId: string, numberOfOtherWords: number): string[] {
-  const insertIndex = Math.min(numberOfOtherWords, queue.length);
-  return [...queue.slice(0, insertIndex), wordId, ...queue.slice(insertIndex)];
-}
-
-function nextRecognitionCount(familiarity: Familiarity, previousRecognitionCount: number): number {
-  if (familiarity === 'known') {
-    return Math.min(previousRecognitionCount + 1, MAX_RECOGNITION_COUNT);
-  }
-  if (familiarity === 'unknown') {
-    return 0;
-  }
-  return previousRecognitionCount;
-}
 
 const CHOICES: { familiarity: Familiarity; label: string }[] = [
   { familiarity: 'unknown', label: '不认识' },
@@ -87,25 +47,203 @@ const CHOICES: { familiarity: Familiarity; label: string }[] = [
 
 type LoadState = 'loading' | 'loaded' | 'error';
 
+function makeSessionId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+// 'book-exhausted' is a normal, happy finish (the word book simply ran out
+// of new words before the 10-word goal) — it must read the same as hitting
+// the goal, never as a fatigue pause. Only the two 'paused-*' safety-cap
+// reasons get the "paused" wording.
+function learnSummaryTitle(endReason: LearnSession['endReason']): string {
+  return endReason === 'completed-target' || endReason === 'book-exhausted' ? '本组完成' : '本组已暂停';
+}
+
+// ---------------------------------------------------------------------------
+// Shared word card: used by both the Learn-active and Review-active screens
+// so pronunciation, bookmarking, and the choice buttons only exist once.
+// ---------------------------------------------------------------------------
+
+type WordCardProps = {
+  word: VocabularyItem;
+  headerLabel: string;
+  recognitionCount: number;
+  isSaved: boolean;
+  isBookmarkBusy: boolean;
+  savedLoadState: LoadState;
+  onRetrySavedLoad: () => void;
+  onToggleBookmark: () => void;
+  bookmarkError: string | null;
+  isSaving: boolean;
+  saveError: string | null;
+  onChoice: (familiarity: Familiarity) => void;
+};
+
+function WordCard({
+  word,
+  headerLabel,
+  recognitionCount,
+  isSaved,
+  isBookmarkBusy,
+  savedLoadState,
+  onRetrySavedLoad,
+  onToggleBookmark,
+  bookmarkError,
+  isSaving,
+  saveError,
+  onChoice,
+}: WordCardProps) {
+  return (
+    <View style={styles.card}>
+      <Text style={styles.sessionHeaderText}>{headerLabel}</Text>
+
+      <Text style={styles.word}>{word.term}</Text>
+
+      <View style={styles.pronunciationRow}>
+        {word.ipa && (
+          <View style={styles.ipaGroup}>
+            <Text style={styles.ipa}>/{word.ipa}/</Text>
+            <Text style={styles.accentBadge}>US</Text>
+          </View>
+        )}
+        {word.partOfSpeech && <Text style={styles.partOfSpeech}>{word.partOfSpeech}</Text>}
+        <Pressable
+          onPress={() => playPronunciation(word.pronunciationText ?? word.term)}
+          accessibilityRole="button"
+          accessibilityLabel={`播放 ${word.term} 的发音`}
+          hitSlop={8}
+          style={styles.speakerButton}>
+          <SymbolView
+            name={{ ios: 'speaker.wave.2.fill', android: 'volume_up', web: 'volume_up' }}
+            tintColor="#2f95dc"
+            size={20}
+          />
+        </Pressable>
+
+        <Pressable
+          onPress={onToggleBookmark}
+          disabled={isBookmarkBusy || savedLoadState !== 'loaded'}
+          accessibilityRole="button"
+          accessibilityLabel={isSaved ? `取消收藏 ${word.term}` : `收藏 ${word.term}`}
+          hitSlop={8}
+          style={styles.bookmarkButton}>
+          <SymbolView
+            name={{
+              ios: isSaved ? 'bookmark.fill' : 'bookmark',
+              android: isSaved ? 'bookmark' : 'bookmark_border',
+              web: isSaved ? 'bookmark' : 'bookmark_border',
+            }}
+            tintColor="#2f95dc"
+            size={20}
+          />
+        </Pressable>
+      </View>
+
+      {savedLoadState === 'error' && (
+        <View style={styles.bookmarkStatusRow}>
+          <Text style={styles.statusText}>收藏状态加载失败</Text>
+          <Pressable
+            onPress={onRetrySavedLoad}
+            accessibilityRole="button"
+            accessibilityLabel="重试加载收藏状态"
+            style={styles.smallRetryButton}>
+            <Text style={styles.smallRetryButtonText}>重试</Text>
+          </Pressable>
+        </View>
+      )}
+      {bookmarkError && <Text style={styles.errorText}>{bookmarkError}</Text>}
+
+      <Text style={styles.recognitionProgress}>
+        认识进度 {recognitionCount} / {MAX_RECOGNITION_COUNT}
+      </Text>
+
+      <Text style={styles.meaning}>中文：{word.chineseMeaning}</Text>
+
+      {word.englishDefinition && (
+        <>
+          <Text style={styles.sectionLabel}>Definition</Text>
+          <Text style={styles.example}>{word.englishDefinition}</Text>
+        </>
+      )}
+
+      {word.exampleSentence && (
+        <>
+          <Text style={styles.sectionLabel}>Example</Text>
+          <Text style={styles.example}>{word.exampleSentence}</Text>
+        </>
+      )}
+
+      {word.exampleTranslation && (
+        <>
+          <Text style={styles.sectionLabel}>翻译</Text>
+          <Text style={styles.translation}>{word.exampleTranslation}</Text>
+        </>
+      )}
+
+      {saveError && <Text style={styles.errorText}>{saveError}</Text>}
+      {isSaving && <Text style={styles.statusText}>正在保存…</Text>}
+
+      <View style={styles.choiceRow}>
+        {CHOICES.map(({ familiarity, label }) => (
+          <Pressable
+            key={familiarity}
+            onPress={() => onChoice(familiarity)}
+            disabled={isSaving}
+            accessibilityRole="button"
+            accessibilityLabel={`标记 ${word.term} 为${label}`}
+            style={[styles.choiceButton, isSaving && styles.disabledOpacity]}>
+            <Text style={styles.choiceButtonText}>{label}</Text>
+          </Pressable>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main screen
+// ---------------------------------------------------------------------------
+
 export default function LearnScreen() {
   const { session: authSession } = useAuth();
 
   const [selectedWordBookId, setSelectedWordBookId] = useState(wordBooks[0].id);
-  const [sessionsByBookId, setSessionsByBookId] = useState<Record<string, WordBookSession>>({});
   const [progressByItemId, setProgressByItemId] = useState<Record<string, UserWordProgress>>({});
   const [loadState, setLoadState] = useState<LoadState>('loading');
   const [retryToken, setRetryToken] = useState(0);
+
+  // The clock "due" checks are computed against. Deliberately a piece of
+  // state (not a hidden Date.now() call inside a memo) so every place that
+  // needs the due list to reflect the passage of time can explicitly
+  // trigger a refresh — see refreshReviewNow and the nearest-due timer
+  // effect below.
+  const [reviewNowMs, setReviewNowMs] = useState(() => Date.now());
+  const refreshReviewNow = useCallback(() => {
+    setReviewNowMs(Date.now());
+  }, []);
+
+  const [screenMode, setScreenMode] = useState<ScreenMode>('panel');
+  const [learnSession, setLearnSession] = useState<LearnSession | null>(null);
+  const [reviewSession, setReviewSession] = useState<ReviewSession | null>(null);
+
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isRestarting, setIsRestarting] = useState(false);
   const [restartError, setRestartError] = useState<string | null>(null);
+
   const [savedItems, setSavedItems] = useState<SavedItem[]>([]);
   const [savedLoadState, setSavedLoadState] = useState<LoadState>('loading');
   const [savedRetryToken, setSavedRetryToken] = useState(0);
   const [isBookmarkBusy, setIsBookmarkBusy] = useState(false);
   const [bookmarkError, setBookmarkError] = useState<string | null>(null);
-  const handledPresentationKeyRef = useRef<string | null>(null);
-  const lastAutoPlayedPresentationKeyRef = useRef<string | null>(null);
+
+  // Synchronous dedup lock for the current card's judgement, plus a
+  // monotonic token that invalidates any in-flight async result once the
+  // user leaves the session it belongs to (new group, return to panel,
+  // word book switch, sign-out, or unmount).
+  const handledAnswerKeyRef = useRef<string | null>(null);
+  const sessionTokenRef = useRef(0);
+  const lastAutoPlayedKeyRef = useRef<string | null>(null);
 
   const selectedWordBook = wordBooks.find((book) => book.id === selectedWordBookId)!;
 
@@ -114,14 +252,50 @@ export default function LearnScreen() {
     [selectedWordBookId],
   );
 
-  const session =
-    sessionsByBookId[selectedWordBookId] ?? createInitialSession(wordsInBook.map((item) => item.id));
-  const isRoundComplete = session.queue.length === 0;
-  const currentWord = isRoundComplete ? undefined : vocabularyById.get(session.queue[0]);
-
   const masteredCount = wordsInBook.filter(
     (item) => progressByItemId[item.id]?.status === 'mastered',
   ).length;
+
+  // New-word definition: no progress row at all (our own writes never save
+  // status 'new', so this is effectively "never studied").
+  const newWordIds = useMemo(
+    () => wordsInBook.filter((item) => isNewWord(progressByItemId[item.id])).map((item) => item.id),
+    [wordsInBook, progressByItemId],
+  );
+
+  // Due-word definition: isEligibleForReview is the single source of truth
+  // for "has real progress, isn't still new, and its nextReviewAt has
+  // passed" — this keeps Learn and Review mutually exclusive by
+  // construction instead of re-deriving the rule here. Driven by the
+  // explicit reviewNowMs clock (never a hidden Date.now() call inside the
+  // memo), so recomputation is fully controlled by when reviewNowMs itself
+  // is refreshed.
+  const dueWordIds = useMemo(() => {
+    return wordsInBook
+      .filter((item) => isEligibleForReview(progressByItemId[item.id], reviewNowMs))
+      .map((item) => item.id)
+      .sort((a, b) => compareByReviewUrgency(progressByItemId[a], progressByItemId[b]));
+  }, [wordsInBook, progressByItemId, reviewNowMs]);
+
+  const learnPhase: 'active' | 'summary' | null =
+    screenMode === 'learn' && learnSession ? (learnSession.endReason === null ? 'active' : 'summary') : null;
+  const reviewPhase: 'active' | 'summary' | null =
+    screenMode === 'review' && reviewSession
+      ? isReviewSessionComplete(reviewSession)
+        ? 'summary'
+        : 'active'
+      : null;
+
+  const currentWord: VocabularyItem | undefined = useMemo(() => {
+    if (learnPhase === 'active' && learnSession) {
+      return learnSession.currentWordId ? vocabularyById.get(learnSession.currentWordId) : undefined;
+    }
+    if (reviewPhase === 'active' && reviewSession) {
+      const id = reviewSession.remainingQueue[0];
+      return id ? vocabularyById.get(id) : undefined;
+    }
+    return undefined;
+  }, [learnPhase, learnSession, reviewPhase, reviewSession]);
 
   const savedItemByContent = useMemo(() => {
     const map: Record<string, SavedItem> = {};
@@ -137,28 +311,19 @@ export default function LearnScreen() {
   // Loads the current user's saved items. Independent of word-progress
   // loading — a failure here must never block studying. Refreshes every
   // time the Learn tab regains focus (e.g. after removing a bookmark from
-  // the Saved tab). `savedRetryToken` is a dependency purely so the retry
-  // button can force a reload: useFocusEffect's internal effect depends on
-  // this callback's identity, so bumping the token makes it clean up the
-  // in-flight request (via the returned cleanup) and immediately restart —
-  // calling loadSavedItems() directly would not do this, since its cleanup
-  // is only ever wired up through useFocusEffect itself.
+  // the Saved tab).
   const loadSavedItems = useCallback(() => {
     let isActive = true;
     setSavedLoadState('loading');
 
     fetchSavedItems()
       .then((items) => {
-        if (!isActive) {
-          return;
-        }
+        if (!isActive) return;
         setSavedItems(items);
         setSavedLoadState('loaded');
       })
       .catch(() => {
-        if (!isActive) {
-          return;
-        }
+        if (!isActive) return;
         setSavedLoadState('error');
       });
 
@@ -169,6 +334,14 @@ export default function LearnScreen() {
 
   useFocusEffect(loadSavedItems);
 
+  // Requirement: refresh the due-time clock every time this tab regains
+  // focus (e.g. the user left the app for a while and came back).
+  useFocusEffect(
+    useCallback(() => {
+      refreshReviewNow();
+    }, [refreshReviewNow]),
+  );
+
   // Tracks which word is currently shown so async bookmark requests can tell
   // whether the user has already moved on by the time they settle, and
   // clears any bookmark error left over from the previous card.
@@ -178,10 +351,10 @@ export default function LearnScreen() {
     setBookmarkError(null);
   }, [currentWord?.id]);
 
-  // Loads remote progress once a session is available, rebuilding sessions
-  // for all three word books from it. Cancels stale results so an outdated
-  // request (component unmounted, or a different user signed in) can never
-  // clobber newer state.
+  // Loads remote progress once a session is available. Also resets every
+  // piece of active-session state back to the control panel: a different
+  // signed-in user (or a manual retry) must never inherit another user's
+  // in-progress Learn/Review group.
   useEffect(() => {
     const userId = authSession?.user.id;
     if (!userId) {
@@ -190,22 +363,24 @@ export default function LearnScreen() {
 
     let isCancelled = false;
     setLoadState('loading');
+    sessionTokenRef.current += 1;
+    handledAnswerKeyRef.current = null;
+    lastAutoPlayedKeyRef.current = null;
+    setScreenMode('panel');
+    setLearnSession(null);
+    setReviewSession(null);
+    setIsSaving(false);
+    setSaveError(null);
+    setReviewNowMs(Date.now());
 
     fetchWordProgress()
       .then((remoteProgress) => {
-        if (isCancelled) {
-          return;
-        }
+        if (isCancelled) return;
         setProgressByItemId(remoteProgress);
-        setSessionsByBookId(buildInitialSessionsFromProgress(remoteProgress));
-        handledPresentationKeyRef.current = null;
-        lastAutoPlayedPresentationKeyRef.current = null;
         setLoadState('loaded');
       })
       .catch(() => {
-        if (isCancelled) {
-          return;
-        }
+        if (isCancelled) return;
         setLoadState('error');
       });
 
@@ -214,31 +389,98 @@ export default function LearnScreen() {
     };
   }, [authSession?.user.id, retryToken]);
 
-  // Auto-plays each new card's pronunciation exactly once. The ref guard
-  // (rather than relying on the dependency array alone) protects against
-  // React re-running this effect for the same card, e.g. under Strict Mode's
-  // double-invocation in development.
+  // Invalidates any in-flight save the moment this screen unmounts, so its
+  // result can never be applied to state that no longer exists.
+  useEffect(() => {
+    return () => {
+      sessionTokenRef.current += 1;
+    };
+  }, []);
+
+  // Auto-plays each new card's pronunciation exactly once, for either mode.
+  // The ref guard (rather than the dependency array alone) protects against
+  // React re-running this effect for the same card, e.g. under Strict
+  // Mode's double-invocation in development.
   useEffect(() => {
     if (loadState !== 'loaded' || !currentWord) {
       return;
     }
 
-    const presentationKey = `${selectedWordBookId}:${session.reviewSequence}:${currentWord.id}`;
-    if (lastAutoPlayedPresentationKeyRef.current === presentationKey) {
+    const key =
+      learnPhase === 'active' && learnSession
+        ? `learn:${learnSession.sessionId}:${learnSession.totalPresentationCount}:${currentWord.id}`
+        : reviewPhase === 'active' && reviewSession
+          ? `review:${reviewSession.sessionId}:${reviewSession.reviewedWordIds.length}:${currentWord.id}`
+          : null;
+
+    if (!key || lastAutoPlayedKeyRef.current === key) {
       return;
     }
-    lastAutoPlayedPresentationKeyRef.current = presentationKey;
+    lastAutoPlayedKeyRef.current = key;
 
     void playPronunciation(currentWord.pronunciationText ?? currentWord.term);
-  }, [loadState, selectedWordBookId, session.reviewSequence, currentWord]);
+  }, [loadState, learnPhase, learnSession, reviewPhase, reviewSession, currentWord]);
 
-  const handleSelectWordBook = (bookId: string) => {
-    if (isSaving || isRestarting) {
+  // Requirement: while sitting on the control panel with at least one word
+  // that is eligible for Review but not due *yet*, schedule a one-shot
+  // timer that refreshes reviewNowMs right as the nearest one becomes due,
+  // so the Review count updates itself without the user having to leave
+  // and come back. A small tolerance avoids firing a moment too early on
+  // the exact due instant. Recomputed whenever progress changes (a fresh
+  // answer may set a new nearest due time), the panel becomes visible, or
+  // reviewNowMs itself changes — the last one is what makes this
+  // self-chaining: once the nearest word's timer fires and bumps
+  // reviewNowMs, this effect reruns, rescans with a fresh Date.now(), and
+  // schedules the *next* nearest future due word (if any). That rescan
+  // always excludes words that just became due, so a fired timer can never
+  // immediately reschedule itself — only a genuinely different, still
+  // in the future word ever gets a new timer. Deliberately does nothing
+  // outside the panel screen, and the returned cleanup always cancels the
+  // pending timeout, so it can never fire (and call setState) after this
+  // effect reruns or the component unmounts.
+  useEffect(() => {
+    if (loadState !== 'loaded' || screenMode !== 'panel') {
       return;
     }
+
+    const nowMs = Date.now();
+    let nearestFutureDueMs: number | null = null;
+
+    for (const item of wordsInBook) {
+      const progress = progressByItemId[item.id];
+      if (!progress || isNewWord(progress) || isDueForReview(progress, nowMs)) {
+        continue;
+      }
+      const raw = progress.nextReviewAt;
+      if (!raw) continue;
+      const parsedMs = Date.parse(raw);
+      if (Number.isNaN(parsedMs)) continue;
+      if (nearestFutureDueMs === null || parsedMs < nearestFutureDueMs) {
+        nearestFutureDueMs = parsedMs;
+      }
+    }
+
+    if (nearestFutureDueMs === null) {
+      return;
+    }
+
+    const DUE_TIMER_TOLERANCE_MS = 1000;
+    const delayMs = Math.max(0, nearestFutureDueMs - Date.now() + DUE_TIMER_TOLERANCE_MS);
+    const timeoutId = setTimeout(() => {
+      setReviewNowMs(Date.now());
+    }, delayMs);
+
+    return () => {
+      clearTimeout(timeoutId);
+    };
+  }, [loadState, screenMode, wordsInBook, progressByItemId, reviewNowMs]);
+
+  const handleSelectWordBook = (bookId: string) => {
+    if (isRestarting) return;
     setSelectedWordBookId(bookId);
     setSaveError(null);
     setRestartError(null);
+    refreshReviewNow();
   };
 
   const handleToggleBookmark = async () => {
@@ -293,31 +535,34 @@ export default function LearnScreen() {
     setIsBookmarkBusy(false);
   };
 
-  const handleChoice = async (familiarity: Familiarity) => {
-    if (!currentWord || isSaving) {
-      return;
-    }
+  // Shared save-then-advance core for both Learn and Review: compute the
+  // new progress, persist it first, and only touch session state once the
+  // save has actually succeeded — exactly the ordering the app already
+  // relies on elsewhere for reliability.
+  const submitAnswer = async (
+    familiarity: Familiarity,
+    applyToSession: (recognitionCount: number) => void,
+  ) => {
+    if (!currentWord) return;
 
-    const presentationKey = `${selectedWordBookId}:${session.reviewSequence}:${currentWord.id}`;
-    if (handledPresentationKeyRef.current === presentationKey) {
-      return;
-    }
-    handledPresentationKeyRef.current = presentationKey;
-
-    const now = new Date().toISOString();
-    const previous = progressByItemId[currentWord.id];
+    const wordId = currentWord.id;
+    const now = new Date();
+    const previous = progressByItemId[wordId];
     const recognitionCount = nextRecognitionCount(familiarity, previous?.recognitionCount ?? 0);
-    const status: LearningStatus = recognitionCount >= MAX_RECOGNITION_COUNT ? 'mastered' : 'learning';
+    const status = nextLearningStatus(recognitionCount);
+    const nextReviewAt = computeNextReviewAt(familiarity, recognitionCount, now);
 
     const nextProgress: UserWordProgress = {
-      vocabularyItemId: currentWord.id,
+      vocabularyItemId: wordId,
       status,
       familiarity,
       recognitionCount,
       reviewCount: (previous?.reviewCount ?? 0) + 1,
-      lastReviewedAt: now,
-      nextReviewAt: previous?.nextReviewAt,
+      lastReviewedAt: now.toISOString(),
+      nextReviewAt,
     };
+
+    const requestToken = sessionTokenRef.current;
 
     setIsSaving(true);
     setSaveError(null);
@@ -325,61 +570,111 @@ export default function LearnScreen() {
     try {
       await saveWordProgress(nextProgress);
     } catch {
-      // Reset the guard so the same card can be retried.
-      handledPresentationKeyRef.current = null;
-      setSaveError('进度保存失败，请检查网络后重试。');
-      setIsSaving(false);
+      if (sessionTokenRef.current === requestToken) {
+        // Reset the guard so the same card can be retried.
+        handledAnswerKeyRef.current = null;
+        setSaveError('进度保存失败，请检查网络后重试。');
+        setIsSaving(false);
+      }
       return;
     }
 
-    setProgressByItemId((prev) => ({
-      ...prev,
-      [currentWord.id]: nextProgress,
-    }));
+    if (sessionTokenRef.current !== requestToken) {
+      // The user already left this session (new group / returned to panel /
+      // switched word book / signed out) — the save still succeeded and
+      // persisted, but must not be applied to state that no longer exists.
+      return;
+    }
 
-    setSessionsByBookId((prev) => {
-      const current =
-        prev[selectedWordBookId] ?? createInitialSession(wordsInBook.map((item) => item.id));
-
-      // Boundary guard: only mutate the queue if this word is still at the
-      // head — otherwise the session already moved on and this is stale.
-      if (current.queue[0] !== currentWord.id) {
-        return prev;
-      }
-
-      const remainingQueue = current.queue.slice(1);
-      let nextQueue: string[];
-
-      if (familiarity === 'unknown') {
-        nextQueue = insertAfter(remainingQueue, currentWord.id, 1);
-      } else if (familiarity === 'fuzzy') {
-        nextQueue = insertAfter(remainingQueue, currentWord.id, 3);
-      } else if (status === 'mastered') {
-        nextQueue = remainingQueue;
-      } else {
-        nextQueue = [...remainingQueue, currentWord.id];
-      }
-
-      return {
-        ...prev,
-        [selectedWordBookId]: {
-          ...current,
-          queue: nextQueue,
-          reviewSequence: current.reviewSequence + 1,
-          unknownCount: current.unknownCount + (familiarity === 'unknown' ? 1 : 0),
-          fuzzyCount: current.fuzzyCount + (familiarity === 'fuzzy' ? 1 : 0),
-          knownCount: current.knownCount + (familiarity === 'known' ? 1 : 0),
-        },
-      };
-    });
-
+    setProgressByItemId((prev) => ({ ...prev, [wordId]: nextProgress }));
+    applyToSession(recognitionCount);
     setIsSaving(false);
   };
 
-  const handleRestart = async () => {
-    if (isRestarting || isSaving) {
+  const handleLearnChoice = async (familiarity: Familiarity) => {
+    if (!currentWord || isSaving || !learnSession || learnSession.endReason !== null) {
       return;
     }
+
+    const key = `learn:${learnSession.sessionId}:${learnSession.totalPresentationCount}:${currentWord.id}`;
+    if (handledAnswerKeyRef.current === key) {
+      return;
+    }
+    handledAnswerKeyRef.current = key;
+
+    const wordId = currentWord.id;
+    const activeSessionId = learnSession.sessionId;
+
+    await submitAnswer(familiarity, (recognitionCount) => {
+      setLearnSession((prev) => {
+        if (!prev || prev.sessionId !== activeSessionId) return prev;
+        const result = applyLearnAnswer(prev, wordId, familiarity, recognitionCount >= MAX_RECOGNITION_COUNT);
+        return result ? result.session : prev;
+      });
+    });
+  };
+
+  const handleReviewChoice = async (familiarity: Familiarity) => {
+    if (!currentWord || isSaving || !reviewSession || isReviewSessionComplete(reviewSession)) {
+      return;
+    }
+
+    const key = `review:${reviewSession.sessionId}:${reviewSession.reviewedWordIds.length}:${currentWord.id}`;
+    if (handledAnswerKeyRef.current === key) {
+      return;
+    }
+    handledAnswerKeyRef.current = key;
+
+    const wordId = currentWord.id;
+    const activeSessionId = reviewSession.sessionId;
+
+    await submitAnswer(familiarity, () => {
+      setReviewSession((prev) => {
+        if (!prev || prev.sessionId !== activeSessionId) return prev;
+        const result = applyReviewAnswer(prev, wordId, familiarity);
+        return result ?? prev;
+      });
+    });
+  };
+
+  const handleStartLearn = () => {
+    if (isSaving || newWordIds.length === 0) return;
+    sessionTokenRef.current += 1;
+    handledAnswerKeyRef.current = null;
+    lastAutoPlayedKeyRef.current = null;
+    setSaveError(null);
+    setReviewSession(null);
+    setLearnSession(createLearnSession(selectedWordBookId, makeSessionId('learn'), newWordIds));
+    setScreenMode('learn');
+  };
+
+  const handleStartReview = () => {
+    if (isSaving || dueWordIds.length === 0) return;
+    sessionTokenRef.current += 1;
+    handledAnswerKeyRef.current = null;
+    lastAutoPlayedKeyRef.current = null;
+    setSaveError(null);
+    setLearnSession(null);
+    setReviewSession(
+      createReviewSession(selectedWordBookId, makeSessionId('review'), dueWordIds.slice(0, REVIEW_GROUP_SIZE)),
+    );
+    setScreenMode('review');
+  };
+
+  const handleReturnToPanel = () => {
+    if (isSaving) return;
+    sessionTokenRef.current += 1;
+    handledAnswerKeyRef.current = null;
+    lastAutoPlayedKeyRef.current = null;
+    setLearnSession(null);
+    setReviewSession(null);
+    setSaveError(null);
+    setScreenMode('panel');
+    refreshReviewNow();
+  };
+
+  const handleRestartWordBook = async () => {
+    if (isRestarting || isSaving) return;
 
     setIsRestarting(true);
     setRestartError(null);
@@ -392,14 +687,6 @@ export default function LearnScreen() {
       return;
     }
 
-    handledPresentationKeyRef.current = null;
-    lastAutoPlayedPresentationKeyRef.current = null;
-
-    setSessionsByBookId((prev) => ({
-      ...prev,
-      [selectedWordBookId]: createInitialSession(wordsInBook.map((item) => item.id)),
-    }));
-
     setProgressByItemId((prev) => {
       const next = { ...prev };
       for (const item of wordsInBook) {
@@ -409,6 +696,27 @@ export default function LearnScreen() {
     });
 
     setIsRestarting(false);
+  };
+
+  // A destructive, whole-word-book action now lives on the main control
+  // panel, so a mis-tap is more likely than when it was buried at the
+  // bottom of a finished round — require an explicit native confirmation
+  // before the actual deletion runs. The guard here (in addition to the
+  // one inside handleRestartWordBook) also stops a second tap from
+  // re-opening the dialog while a reset is already in flight.
+  const handleRequestRestartWordBook = () => {
+    if (isRestarting || isSaving) return;
+
+    Alert.alert('重新学习整本词书？', '这会清空该词书的全部学习和复习进度，且无法在 App 内撤销。', [
+      { text: '取消', style: 'cancel' },
+      {
+        text: '清空并重新学习',
+        style: 'destructive',
+        onPress: () => {
+          void handleRestartWordBook();
+        },
+      },
+    ]);
   };
 
   return (
@@ -434,7 +742,7 @@ export default function LearnScreen() {
         </View>
       )}
 
-      {loadState === 'loaded' && (
+      {loadState === 'loaded' && screenMode === 'panel' && (
         <>
           <View style={styles.tabRow}>
             {wordBooks.map((book) => {
@@ -443,11 +751,11 @@ export default function LearnScreen() {
                 <Pressable
                   key={book.id}
                   onPress={() => handleSelectWordBook(book.id)}
-                  disabled={isSaving || isRestarting}
+                  disabled={isRestarting}
                   style={[
                     styles.tabButton,
                     isSelected && styles.tabButtonSelected,
-                    (isSaving || isRestarting) && styles.disabledOpacity,
+                    isRestarting && styles.disabledOpacity,
                   ]}>
                   <Text style={[styles.tabButtonText, isSelected && styles.tabButtonTextSelected]}>
                     {book.chineseTitle}
@@ -461,153 +769,208 @@ export default function LearnScreen() {
             <Text style={styles.wordBookTitle}>
               {selectedWordBook.title} · {selectedWordBook.chineseTitle}
             </Text>
-            {!isRoundComplete && (
-              <>
-                <Text style={styles.wordBookCount}>
-                  已掌握 {masteredCount} / {wordsInBook.length}
-                </Text>
-                <Text style={styles.wordBookCount}>待复习 {session.queue.length}</Text>
-              </>
-            )}
+            <Text style={styles.wordBookCount}>
+              已掌握 {masteredCount} / {wordsInBook.length}
+            </Text>
           </View>
 
-          {isRoundComplete ? (
-            <View style={styles.card}>
-              <Text style={styles.summaryTitle}>本轮完成</Text>
-              <Text style={styles.summaryLine}>
-                已掌握：{masteredCount} / {wordsInBook.length}
+          <View style={styles.panelCard}>
+            <Text style={styles.panelCardTitle}>Learn 新词</Text>
+            {newWordIds.length > 0 ? (
+              <Text style={styles.panelCardLine}>剩余未学新词：{newWordIds.length} 个</Text>
+            ) : (
+              <Text style={styles.panelCardEmpty}>本词书新词已全部学完，去 Review 复习吧。</Text>
+            )}
+            <Text style={styles.panelCardLine}>默认目标：完成 {LEARN_TARGET_COMPLETED} 个新词</Text>
+            <Pressable
+              onPress={handleStartLearn}
+              disabled={newWordIds.length === 0}
+              accessibilityRole="button"
+              accessibilityLabel="开始学习"
+              style={[styles.primaryButton, newWordIds.length === 0 && styles.disabledOpacity]}>
+              <Text style={styles.primaryButtonText}>开始学习</Text>
+            </Pressable>
+          </View>
+
+          <View style={styles.panelCard}>
+            <Text style={styles.panelCardTitle}>Review 复习</Text>
+            {dueWordIds.length > 0 ? (
+              <Text style={styles.panelCardLine}>
+                当前到期：{dueWordIds.length} 个（每组最多 {REVIEW_GROUP_SIZE} 个）
               </Text>
-              <Text style={styles.summaryLine}>不认识选择次数：{session.unknownCount}</Text>
-              <Text style={styles.summaryLine}>模糊选择次数：{session.fuzzyCount}</Text>
-              <Text style={styles.summaryLine}>认识选择次数：{session.knownCount}</Text>
-              <Text style={styles.summaryLine}>总复习次数：{session.reviewSequence}</Text>
+            ) : (
+              <Text style={styles.panelCardEmpty}>暂无到期复习词，继续学习新词吧。</Text>
+            )}
+            <Pressable
+              onPress={handleStartReview}
+              disabled={dueWordIds.length === 0}
+              accessibilityRole="button"
+              accessibilityLabel="开始复习"
+              style={[styles.secondaryButton, dueWordIds.length === 0 && styles.disabledOpacity]}>
+              <Text style={styles.secondaryButtonText}>开始复习</Text>
+            </Pressable>
+          </View>
 
-              {restartError && <Text style={styles.errorText}>{restartError}</Text>}
-
-              <Pressable
-                onPress={handleRestart}
-                disabled={isRestarting || isSaving}
-                accessibilityRole="button"
-                accessibilityLabel="重新学习本词书"
-                style={[styles.restartButton, isRestarting && styles.disabledOpacity]}>
-                <Text style={styles.restartButtonText}>
-                  {isRestarting ? '正在重置…' : '重新学习'}
-                </Text>
-              </Pressable>
-            </View>
-          ) : (
-            currentWord && (
-              <View style={styles.card}>
-                <Text style={styles.word}>{currentWord.term}</Text>
-
-                <View style={styles.pronunciationRow}>
-                  {currentWord.ipa && (
-                    <View style={styles.ipaGroup}>
-                      <Text style={styles.ipa}>/{currentWord.ipa}/</Text>
-                      <Text style={styles.accentBadge}>US</Text>
-                    </View>
-                  )}
-                  {currentWord.partOfSpeech && (
-                    <Text style={styles.partOfSpeech}>{currentWord.partOfSpeech}</Text>
-                  )}
-                  <Pressable
-                    onPress={() =>
-                      playPronunciation(currentWord.pronunciationText ?? currentWord.term)
-                    }
-                    accessibilityRole="button"
-                    accessibilityLabel={`播放 ${currentWord.term} 的发音`}
-                    hitSlop={8}
-                    style={styles.speakerButton}>
-                    <SymbolView
-                      name={{ ios: 'speaker.wave.2.fill', android: 'volume_up', web: 'volume_up' }}
-                      tintColor="#2f95dc"
-                      size={20}
-                    />
-                  </Pressable>
-
-                  <Pressable
-                    onPress={handleToggleBookmark}
-                    disabled={isBookmarkBusy || savedLoadState !== 'loaded'}
-                    accessibilityRole="button"
-                    accessibilityLabel={
-                      isCurrentWordSaved ? `取消收藏 ${currentWord.term}` : `收藏 ${currentWord.term}`
-                    }
-                    hitSlop={8}
-                    style={styles.bookmarkButton}>
-                    <SymbolView
-                      name={{
-                        ios: isCurrentWordSaved ? 'bookmark.fill' : 'bookmark',
-                        android: isCurrentWordSaved ? 'bookmark' : 'bookmark_border',
-                        web: isCurrentWordSaved ? 'bookmark' : 'bookmark_border',
-                      }}
-                      tintColor="#2f95dc"
-                      size={20}
-                    />
-                  </Pressable>
-                </View>
-
-                {savedLoadState === 'error' && (
-                  <View style={styles.bookmarkStatusRow}>
-                    <Text style={styles.statusText}>收藏状态加载失败</Text>
-                    <Pressable
-                      onPress={() => setSavedRetryToken((n) => n + 1)}
-                      accessibilityRole="button"
-                      accessibilityLabel="重试加载收藏状态"
-                      style={styles.smallRetryButton}>
-                      <Text style={styles.smallRetryButtonText}>重试</Text>
-                    </Pressable>
-                  </View>
-                )}
-                {bookmarkError && <Text style={styles.errorText}>{bookmarkError}</Text>}
-
-                <Text style={styles.recognitionProgress}>
-                  认识进度 {progressByItemId[currentWord.id]?.recognitionCount ?? 0} /{' '}
-                  {MAX_RECOGNITION_COUNT}
-                </Text>
-
-                <Text style={styles.meaning}>中文：{currentWord.chineseMeaning}</Text>
-
-                {currentWord.englishDefinition && (
-                  <>
-                    <Text style={styles.sectionLabel}>Definition</Text>
-                    <Text style={styles.example}>{currentWord.englishDefinition}</Text>
-                  </>
-                )}
-
-                {currentWord.exampleSentence && (
-                  <>
-                    <Text style={styles.sectionLabel}>Example</Text>
-                    <Text style={styles.example}>{currentWord.exampleSentence}</Text>
-                  </>
-                )}
-
-                {currentWord.exampleTranslation && (
-                  <>
-                    <Text style={styles.sectionLabel}>翻译</Text>
-                    <Text style={styles.translation}>{currentWord.exampleTranslation}</Text>
-                  </>
-                )}
-
-                {saveError && <Text style={styles.errorText}>{saveError}</Text>}
-                {isSaving && <Text style={styles.statusText}>正在保存…</Text>}
-
-                <View style={styles.choiceRow}>
-                  {CHOICES.map(({ familiarity, label }) => (
-                    <Pressable
-                      key={familiarity}
-                      onPress={() => handleChoice(familiarity)}
-                      disabled={isSaving}
-                      accessibilityRole="button"
-                      accessibilityLabel={`标记 ${currentWord.term} 为${label}`}
-                      style={[styles.choiceButton, isSaving && styles.disabledOpacity]}>
-                      <Text style={styles.choiceButtonText}>{label}</Text>
-                    </Pressable>
-                  ))}
-                </View>
-              </View>
-            )
-          )}
+          <View style={styles.restartSection}>
+            {restartError && <Text style={styles.errorText}>{restartError}</Text>}
+            <Pressable
+              onPress={handleRequestRestartWordBook}
+              disabled={isRestarting}
+              accessibilityRole="button"
+              accessibilityLabel="重新学习整本词书，清空本词书学习进度"
+              style={[styles.dangerLinkButton, isRestarting && styles.disabledOpacity]}>
+              <Text style={styles.dangerLinkButtonText}>
+                {isRestarting ? '正在重置…' : '重新学习整本词书（清空本词书学习进度）'}
+              </Text>
+            </Pressable>
+          </View>
         </>
+      )}
+
+      {loadState === 'loaded' && learnPhase === 'active' && learnSession && currentWord && (
+        <>
+          <Text style={styles.wordBookTitle}>
+            {selectedWordBook.title} · {selectedWordBook.chineseTitle}
+          </Text>
+          <WordCard
+            word={currentWord}
+            headerLabel={`完成 ${learnSession.completedWordIds.length} / ${LEARN_TARGET_COMPLETED} · 本组已见新词 ${learnSession.seenWordIds.length} 个`}
+            recognitionCount={progressByItemId[currentWord.id]?.recognitionCount ?? 0}
+            isSaved={isCurrentWordSaved}
+            isBookmarkBusy={isBookmarkBusy}
+            savedLoadState={savedLoadState}
+            onRetrySavedLoad={() => setSavedRetryToken((n) => n + 1)}
+            onToggleBookmark={handleToggleBookmark}
+            bookmarkError={bookmarkError}
+            isSaving={isSaving}
+            saveError={saveError}
+            onChoice={handleLearnChoice}
+          />
+          <Pressable
+            onPress={handleReturnToPanel}
+            disabled={isSaving}
+            accessibilityRole="button"
+            accessibilityLabel="退出本组，返回学习控制面板"
+            style={[styles.exitLinkButton, isSaving && styles.disabledOpacity]}>
+            <Text style={styles.exitLinkButtonText}>退出本组，返回控制面板</Text>
+          </Pressable>
+        </>
+      )}
+
+      {loadState === 'loaded' && learnPhase === 'summary' && learnSession && (
+        <View style={styles.card}>
+          <Text style={styles.summaryTitle}>{learnSummaryTitle(learnSession.endReason)}</Text>
+          {learnSession.endReason === 'book-exhausted' && (
+            <Text style={styles.summaryLine}>本词书新词已全部学完。</Text>
+          )}
+          <Text style={styles.summaryLine}>
+            完成目标：{learnSession.completedWordIds.length} / {LEARN_TARGET_COMPLETED}
+          </Text>
+          <Text style={styles.summaryLine}>本组见过的新词数量：{learnSession.seenWordIds.length}</Text>
+          <Text style={styles.summaryLine}>卡片总展示次数：{learnSession.totalPresentationCount}</Text>
+          <Text style={styles.summaryLine}>不认识选择次数：{learnSession.unknownCount}</Text>
+          <Text style={styles.summaryLine}>模糊选择次数：{learnSession.fuzzyCount}</Text>
+          <Text style={styles.summaryLine}>认识选择次数：{learnSession.knownCount}</Text>
+
+          <Text style={styles.sectionLabel}>本组完成词</Text>
+          <Text style={styles.example}>
+            {learnSession.completedWordIds.length > 0
+              ? learnSession.completedWordIds
+                  .map((id) => vocabularyById.get(id)?.term ?? id)
+                  .join('、')
+              : '暂无'}
+          </Text>
+
+          <Text style={styles.sectionLabel}>转入 Review 的困难词</Text>
+          <Text style={styles.example}>
+            {learnSession.graduatedWordIds.length > 0
+              ? learnSession.graduatedWordIds
+                  .map((id) => vocabularyById.get(id)?.term ?? id)
+                  .join('、')
+              : '暂无'}
+          </Text>
+
+          <Text style={styles.summaryLine}>当前词书剩余新词数量：{newWordIds.length}</Text>
+
+          <Text style={styles.hintText}>已经完成一组学习，休息一下再继续吧。</Text>
+
+          <Pressable
+            onPress={handleReturnToPanel}
+            accessibilityRole="button"
+            accessibilityLabel="完成本组，返回学习控制面板"
+            style={styles.restartButton}>
+            <Text style={styles.restartButtonText}>完成本组，返回控制面板</Text>
+          </Pressable>
+
+          {newWordIds.length > 0 && (
+            <Pressable
+              onPress={handleStartLearn}
+              accessibilityRole="button"
+              accessibilityLabel="再学一组"
+              style={styles.secondaryButton}>
+              <Text style={styles.secondaryButtonText}>再学一组</Text>
+            </Pressable>
+          )}
+        </View>
+      )}
+
+      {loadState === 'loaded' && reviewPhase === 'active' && reviewSession && currentWord && (
+        <>
+          <Text style={styles.wordBookTitle}>
+            {selectedWordBook.title} · {selectedWordBook.chineseTitle}
+          </Text>
+          <WordCard
+            word={currentWord}
+            headerLabel={`复习进度 ${reviewSession.reviewedWordIds.length} / ${reviewSession.totalCount}`}
+            recognitionCount={progressByItemId[currentWord.id]?.recognitionCount ?? 0}
+            isSaved={isCurrentWordSaved}
+            isBookmarkBusy={isBookmarkBusy}
+            savedLoadState={savedLoadState}
+            onRetrySavedLoad={() => setSavedRetryToken((n) => n + 1)}
+            onToggleBookmark={handleToggleBookmark}
+            bookmarkError={bookmarkError}
+            isSaving={isSaving}
+            saveError={saveError}
+            onChoice={handleReviewChoice}
+          />
+          <Pressable
+            onPress={handleReturnToPanel}
+            disabled={isSaving}
+            accessibilityRole="button"
+            accessibilityLabel="退出本组，返回学习控制面板"
+            style={[styles.exitLinkButton, isSaving && styles.disabledOpacity]}>
+            <Text style={styles.exitLinkButtonText}>退出本组，返回控制面板</Text>
+          </Pressable>
+        </>
+      )}
+
+      {loadState === 'loaded' && reviewPhase === 'summary' && reviewSession && (
+        <View style={styles.card}>
+          <Text style={styles.summaryTitle}>本组复习完成</Text>
+          <Text style={styles.summaryLine}>已复习数量：{reviewSession.reviewedWordIds.length}</Text>
+          <Text style={styles.summaryLine}>不认识：{reviewSession.unknownCount}</Text>
+          <Text style={styles.summaryLine}>模糊：{reviewSession.fuzzyCount}</Text>
+          <Text style={styles.summaryLine}>认识：{reviewSession.knownCount}</Text>
+          <Text style={styles.summaryLine}>仍然到期的剩余数量：{dueWordIds.length}</Text>
+
+          <Pressable
+            onPress={handleReturnToPanel}
+            accessibilityRole="button"
+            accessibilityLabel="完成复习，返回学习控制面板"
+            style={styles.restartButton}>
+            <Text style={styles.restartButtonText}>完成复习</Text>
+          </Pressable>
+
+          {dueWordIds.length > 0 && (
+            <Pressable
+              onPress={handleStartReview}
+              accessibilityRole="button"
+              accessibilityLabel="再复习一组"
+              style={styles.secondaryButton}>
+              <Text style={styles.secondaryButtonText}>再复习一组</Text>
+            </Pressable>
+          )}
+        </View>
       )}
     </ScrollView>
   );
@@ -659,11 +1022,63 @@ const styles = StyleSheet.create({
   wordBookTitle: {
     fontSize: 16,
     fontWeight: '600',
+    marginBottom: 12,
+    width: '100%',
   },
   wordBookCount: {
     fontSize: 13,
     color: '#888',
     marginTop: 2,
+  },
+  panelCard: {
+    width: '100%',
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#ddd',
+    padding: 20,
+    gap: 6,
+    marginBottom: 16,
+  },
+  panelCardTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    marginBottom: 2,
+  },
+  panelCardLine: {
+    fontSize: 14,
+    color: '#333',
+  },
+  panelCardEmpty: {
+    fontSize: 14,
+    color: '#888',
+  },
+  restartSection: {
+    width: '100%',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 4,
+  },
+  dangerLinkButton: {
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+  dangerLinkButtonText: {
+    fontSize: 13,
+    color: '#d9534f',
+    textDecorationLine: 'underline',
+  },
+  exitLinkButton: {
+    marginTop: 12,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  exitLinkButtonText: {
+    fontSize: 14,
+    color: '#888',
+    textDecorationLine: 'underline',
   },
   card: {
     width: '100%',
@@ -672,6 +1087,11 @@ const styles = StyleSheet.create({
     borderColor: '#ddd',
     padding: 20,
     gap: 8,
+  },
+  sessionHeaderText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#888',
   },
   word: {
     fontSize: 24,
@@ -771,6 +1191,11 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#d9534f',
   },
+  hintText: {
+    fontSize: 13,
+    color: '#888',
+    marginTop: 4,
+  },
   retryButton: {
     marginTop: 12,
     minHeight: 44,
@@ -813,6 +1238,35 @@ const styles = StyleSheet.create({
   summaryLine: {
     fontSize: 15,
     color: '#333',
+  },
+  primaryButton: {
+    marginTop: 8,
+    minHeight: 44,
+    borderRadius: 10,
+    backgroundColor: '#2f95dc',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+  },
+  primaryButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  secondaryButton: {
+    marginTop: 8,
+    minHeight: 44,
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#2f95dc',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+  },
+  secondaryButtonText: {
+    color: '#2f95dc',
+    fontSize: 16,
+    fontWeight: '600',
   },
   restartButton: {
     marginTop: 16,
