@@ -47,3 +47,28 @@ export interface GenerateInterviewQuestionsResult {
   questions: InterviewQuestion[];
   reused: boolean;
 }
+
+export interface SaveInterviewQuestionNoteInput {
+  interviewSessionId: string;
+  questionId: string;
+  userNotes: string;
+}
+
+export interface GenerateInterviewAnswersResult {
+  questions: InterviewQuestion[];
+  reused: boolean;
+}
+
+export interface InterviewSessionSummary {
+  id: string;
+  jobTitle: string;
+  companyName: string;
+  status: InterviewSessionStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface InterviewSessionDetail {
+  session: InterviewSessionSummary;
+  questions: InterviewQuestion[];
+}

@@ -269,6 +269,101 @@ export default {
       return jsonResponse({ error: 'interviewSessionId is required.' }, 400);
     }
 
+    // Status only ever moves forward, never backward. Given a complete set
+    // of 10 questions, this re-reads the session's current status fresh
+    // (never trusting a value captured earlier in this request) and only
+    // ever advances draft -> questions_ready. questions_ready, answers_ready,
+    // and completed are all left exactly as they are — none of them is ever
+    // downgraded back to questions_ready. Shared by every path that can
+    // return a "the questions are already saved" response, whether that was
+    // true from the very start of this request or only became true partway
+    // through.
+    const finalizeQuestionsReady = async (
+      rows: InterviewQuestionRow[],
+      reused: boolean,
+    ): Promise<Response> => {
+      const sortedRows = [...rows].sort((a, b) => a.question_order - b.question_order);
+      const respondSuccess = () =>
+        jsonResponse({ questions: sortedRows.map(toClientQuestion), reused }, 200);
+
+      const { data: statusRow, error: statusReadError } = await ctx.supabase
+        .from('interview_sessions')
+        .select('status')
+        .eq('id', interviewSessionId)
+        .maybeSingle();
+
+      if (statusReadError || !statusRow) {
+        return jsonResponse({ error: 'Failed to verify interview session status.' }, 500);
+      }
+
+      if (
+        statusRow.status === 'questions_ready' ||
+        statusRow.status === 'answers_ready' ||
+        statusRow.status === 'completed'
+      ) {
+        return respondSuccess();
+      }
+
+      if (statusRow.status === 'draft') {
+        // Chain select().maybeSingle() so we know whether the conditional
+        // update actually matched a row — a null error here does not by
+        // itself mean the row was updated.
+        const { data: updatedStatusRow, error: statusUpdateError } = await ctx.supabase
+          .from('interview_sessions')
+          .update({ status: 'questions_ready', updated_at: new Date().toISOString() })
+          .eq('id', interviewSessionId)
+          .eq('status', 'draft')
+          .select('status')
+          .maybeSingle();
+
+        if (statusUpdateError) {
+          return jsonResponse({ error: 'Failed to update interview session status.' }, 500);
+        }
+
+        if (updatedStatusRow && updatedStatusRow.status === 'questions_ready') {
+          return respondSuccess();
+        }
+
+        if (!updatedStatusRow) {
+          // The conditional update matched no row — the status must have
+          // changed between the read above and this update. Re-read the
+          // current status before deciding whether that's still a success.
+          const { data: recheckStatusRow, error: recheckStatusError } = await ctx.supabase
+            .from('interview_sessions')
+            .select('status')
+            .eq('id', interviewSessionId)
+            .maybeSingle();
+
+          if (recheckStatusError || !recheckStatusRow) {
+            return jsonResponse({ error: 'Failed to update interview session status.' }, 500);
+          }
+
+          if (
+            recheckStatusRow.status === 'questions_ready' ||
+            recheckStatusRow.status === 'answers_ready' ||
+            recheckStatusRow.status === 'completed'
+          ) {
+            return respondSuccess();
+          }
+
+          return jsonResponse(
+            { error: 'Interview session is not in a state that allows returning questions.' },
+            409,
+          );
+        }
+
+        // A row was returned but its status isn't what we just set — should
+        // be unreachable, but never treat this as success.
+        return jsonResponse({ error: 'Failed to update interview session status.' }, 500);
+      }
+
+      // failed or any other unexpected status — never auto-modified.
+      return jsonResponse(
+        { error: 'Interview session is not in a state that allows returning questions.' },
+        409,
+      );
+    };
+
     // RLS scopes this to sessions owned by the caller; a row that doesn't
     // exist and a row owned by someone else are indistinguishable — both
     // resolve to 404 rather than leaking whether the id exists at all.
@@ -304,21 +399,7 @@ export default {
         return jsonResponse({ error: 'Interview questions are in an inconsistent state.' }, 409);
       }
 
-      if (session.status !== 'questions_ready') {
-        const { error: statusUpdateError } = await ctx.supabase
-          .from('interview_sessions')
-          .update({ status: 'questions_ready', updated_at: new Date().toISOString() })
-          .eq('id', interviewSessionId);
-
-        if (statusUpdateError) {
-          return jsonResponse({ error: 'Failed to update interview session status.' }, 500);
-        }
-      }
-
-      return jsonResponse(
-        { questions: existingQuestions.map(toClientQuestion), reused: true },
-        200,
-      );
+      return await finalizeQuestionsReady(existingQuestions, true);
     }
 
     // No questions exist yet — this must be a first-time generation attempt
@@ -486,45 +567,14 @@ export default {
         .returns<InterviewQuestionRow[]>();
 
       if (recheckQuestions && isCompleteQuestionSet(recheckQuestions)) {
-        if (session.status !== 'questions_ready') {
-          const { error: statusUpdateError } = await ctx.supabase
-            .from('interview_sessions')
-            .update({ status: 'questions_ready', updated_at: new Date().toISOString() })
-            .eq('id', interviewSessionId);
-
-          if (statusUpdateError) {
-            return jsonResponse({ error: 'Failed to update interview session status.' }, 500);
-          }
-        }
-
-        return jsonResponse(
-          { questions: recheckQuestions.map(toClientQuestion), reused: true },
-          200,
-        );
+        return await finalizeQuestionsReady(recheckQuestions, true);
       }
 
       return jsonResponse({ error: 'Failed to save generated questions.' }, 500);
     }
 
-    const { error: updateError } = await ctx.supabase
-      .from('interview_sessions')
-      .update({ status: 'questions_ready', updated_at: new Date().toISOString() })
-      .eq('id', interviewSessionId);
-
-    if (updateError) {
-      return jsonResponse(
-        { error: 'Questions were generated but the session status failed to update.' },
-        500,
-      );
-    }
-
-    // Don't assume PostgREST echoes rows back in insertion order — sort a
-    // copy so first-time generation and later reused reads return questions
-    // in the same question_order sequence.
-    const sortedInsertedRows = [...insertedRows].sort(
-      (a, b) => a.question_order - b.question_order,
-    );
-
-    return jsonResponse({ questions: sortedInsertedRows.map(toClientQuestion), reused: false }, 200);
+    // Only ever advances draft -> questions_ready; never blindly overwrites
+    // whatever status the session happens to be in.
+    return await finalizeQuestionsReady(insertedRows, false);
   }),
 };

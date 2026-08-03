@@ -241,7 +241,15 @@ export default function SavedScreen() {
                   )}
 
                   <View style={styles.rowTextGroup}>
-                    <Text style={styles.itemContent}>{item.content}</Text>
+                    <Text
+                      style={[
+                        styles.itemContent,
+                        item.itemType === 'sentence' && styles.sentenceContent,
+                      ]}
+                      numberOfLines={item.itemType === 'sentence' ? 3 : 2}
+                      ellipsizeMode="tail">
+                      {item.content}
+                    </Text>
                     {item.chineseText && (
                       <Text style={styles.itemChinese}>{item.chineseText}</Text>
                     )}
@@ -416,6 +424,11 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '600',
     color: '#000',
+  },
+  sentenceContent: {
+    fontSize: 16,
+    lineHeight: 22,
+    fontWeight: '400',
   },
   itemChinese: {
     fontSize: 15,

@@ -2,10 +2,14 @@ import { supabase } from '@/src/services/supabase';
 import type { Database } from '@/src/types/database';
 import type {
   CreateInterviewDraftInput,
+  GenerateInterviewAnswersResult,
   GenerateInterviewQuestionsResult,
   InterviewQuestion,
   InterviewQuestionType,
   InterviewSession,
+  InterviewSessionDetail,
+  InterviewSessionSummary,
+  SaveInterviewQuestionNoteInput,
   UploadInterviewCvInput,
 } from '@/src/types/interview';
 
@@ -417,4 +421,268 @@ export async function generateInterviewQuestions(
   }
 
   return { questions, reused: record.reused };
+}
+
+const MAX_GENERATED_ANSWER_LENGTH = 4000;
+
+// Reuses the question-generation validator, then layers on the extra
+// guarantees answer generation requires: every question must now carry a
+// non-empty generatedAnswer within the length limit the Edge Function
+// itself enforces. Does not loosen anything parseGeneratedQuestions already
+// checks — generateInterviewQuestions still calls that function directly,
+// unaffected by this wrapper.
+function parseGeneratedAnswerQuestions(value: unknown): InterviewQuestion[] | null {
+  const questions = parseGeneratedQuestions(value);
+  if (!questions) {
+    return null;
+  }
+
+  const result: InterviewQuestion[] = [];
+
+  for (const question of questions) {
+    if (typeof question.generatedAnswer !== 'string') {
+      return null;
+    }
+
+    const trimmedAnswer = question.generatedAnswer.trim();
+    if (trimmedAnswer.length === 0 || trimmedAnswer.length > MAX_GENERATED_ANSWER_LENGTH) {
+      return null;
+    }
+
+    result.push({ ...question, generatedAnswer: trimmedAnswer });
+  }
+
+  return result;
+}
+
+/**
+ * Invokes the deployed generate-interview-answers Edge Function for an
+ * existing interview session. Auth is handled entirely by the shared
+ * Supabase client's active session — no Authorization header or Function
+ * URL is built by hand here, and no OpenAI credentials ever pass through
+ * this app.
+ */
+export async function generateInterviewAnswers(
+  interviewSessionId: string,
+): Promise<GenerateInterviewAnswersResult> {
+  const trimmedSessionId = interviewSessionId.trim();
+
+  if (trimmedSessionId.length === 0) {
+    throw new Error('Interview session id is required.');
+  }
+
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+
+  if (!session) {
+    throw new Error('Not authenticated.');
+  }
+
+  const { data, error } = await supabase.functions.invoke('generate-interview-answers', {
+    body: { interviewSessionId: trimmedSessionId },
+  });
+
+  if (error || !data || typeof data !== 'object') {
+    throw new Error('Failed to generate interview answers.');
+  }
+
+  const record = data as Record<string, unknown>;
+
+  if (typeof record.reused !== 'boolean') {
+    throw new Error('Failed to generate interview answers.');
+  }
+
+  const questions = parseGeneratedAnswerQuestions(record.questions);
+  if (!questions) {
+    throw new Error('Failed to generate interview answers.');
+  }
+
+  return { questions, reused: record.reused };
+}
+
+type InterviewQuestionRow = Database['public']['Tables']['interview_questions']['Row'];
+
+type SelectedInterviewQuestionRow = Pick<
+  InterviewQuestionRow,
+  | 'id'
+  | 'question_order'
+  | 'question_type'
+  | 'question_text'
+  | 'user_notes'
+  | 'generated_answer'
+  | 'created_at'
+  | 'updated_at'
+>;
+
+const QUESTION_SELECT_COLUMNS =
+  'id, question_order, question_type, question_text, user_notes, generated_answer, created_at, updated_at';
+
+function rowToInterviewQuestion(row: SelectedInterviewQuestionRow): InterviewQuestion {
+  return {
+    id: row.id,
+    questionOrder: row.question_order,
+    questionType: row.question_type as InterviewQuestionType,
+    questionText: row.question_text,
+    userNotes: row.user_notes ?? undefined,
+    generatedAnswer: row.generated_answer ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * Saves (or clears) the user's own notes for one interview question. Only
+ * ever writes user_notes/updated_at — question content, type, order, the
+ * generated answer, and the parent session link are never touched here.
+ * interview_questions has no user_id of its own; ownership is enforced by
+ * the existing RLS policies, which check the row's parent interview_sessions
+ * record instead.
+ */
+export async function saveInterviewQuestionNote(
+  input: SaveInterviewQuestionNoteInput,
+): Promise<InterviewQuestion> {
+  const trimmedSessionId = input.interviewSessionId.trim();
+  const trimmedQuestionId = input.questionId.trim();
+
+  if (trimmedSessionId.length === 0 || trimmedQuestionId.length === 0) {
+    throw new Error('Interview session id and question id are required.');
+  }
+
+  const trimmedNotes = input.userNotes.trim();
+  const userNotes = trimmedNotes.length > 0 ? trimmedNotes : null;
+
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+
+  if (!session) {
+    throw new Error('Not authenticated.');
+  }
+
+  const { data, error } = await supabase
+    .from('interview_questions')
+    .update({
+      user_notes: userNotes,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', trimmedQuestionId)
+    .eq('interview_session_id', trimmedSessionId)
+    .select<string, SelectedInterviewQuestionRow>(QUESTION_SELECT_COLUMNS)
+    .single();
+
+  if (error || !data) {
+    throw new Error('Failed to save interview question note.');
+  }
+
+  return rowToInterviewQuestion(data);
+}
+
+type SelectedInterviewSessionSummaryRow = Pick<
+  InterviewSessionRow,
+  'id' | 'job_title' | 'company_name' | 'status' | 'created_at' | 'updated_at'
+>;
+
+const SUMMARY_SELECT_COLUMNS = 'id, job_title, company_name, status, created_at, updated_at';
+
+function rowToInterviewSessionSummary(
+  row: SelectedInterviewSessionSummaryRow,
+): InterviewSessionSummary {
+  return {
+    id: row.id,
+    jobTitle: row.job_title,
+    companyName: row.company_name,
+    status: row.status as InterviewSessionSummary['status'],
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * Lists the current user's interview sessions for the history screen, newest
+ * first. Only reads the fields a history list needs — no job description
+ * and no CV path/file name/mime type — and never selects user_id, so it
+ * can't leak through rowToInterviewSessionSummary.
+ */
+export async function fetchInterviewSessions(): Promise<InterviewSessionSummary[]> {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+
+  if (!session) {
+    throw new Error('Not authenticated.');
+  }
+
+  const { data, error } = await supabase
+    .from('interview_sessions')
+    .select<string, SelectedInterviewSessionSummaryRow>(SUMMARY_SELECT_COLUMNS)
+    .eq('user_id', session.user.id)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    throw new Error('Failed to fetch interview sessions.');
+  }
+
+  if (!data) {
+    return [];
+  }
+
+  return data.map(rowToInterviewSessionSummary);
+}
+
+/**
+ * Fetches one interview session's summary plus whatever questions (and any
+ * notes/generated answers already on them) exist in the database. Purely
+ * reads existing rows — never triggers question or answer generation, and
+ * never downloads or reads the CV.
+ */
+export async function fetchInterviewSessionDetail(
+  interviewSessionId: string,
+): Promise<InterviewSessionDetail | null> {
+  const trimmedSessionId = interviewSessionId.trim();
+
+  if (trimmedSessionId.length === 0) {
+    throw new Error('Interview session id is required.');
+  }
+
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+
+  if (!session) {
+    throw new Error('Not authenticated.');
+  }
+
+  const { data: sessionRow, error: sessionError } = await supabase
+    .from('interview_sessions')
+    .select<string, SelectedInterviewSessionSummaryRow>(SUMMARY_SELECT_COLUMNS)
+    .eq('id', trimmedSessionId)
+    .eq('user_id', session.user.id)
+    .maybeSingle();
+
+  if (sessionError) {
+    throw new Error('Failed to fetch interview session detail.');
+  }
+
+  if (!sessionRow) {
+    // A session that doesn't exist and one owned by someone else are
+    // indistinguishable here — both resolve to null rather than leaking
+    // whether the id exists at all.
+    return null;
+  }
+
+  const { data: questionRows, error: questionsError } = await supabase
+    .from('interview_questions')
+    .select<string, SelectedInterviewQuestionRow>(QUESTION_SELECT_COLUMNS)
+    .eq('interview_session_id', trimmedSessionId)
+    .order('question_order', { ascending: true });
+
+  if (questionsError) {
+    throw new Error('Failed to fetch interview session detail.');
+  }
+
+  return {
+    session: rowToInterviewSessionSummary(sessionRow),
+    questions: (questionRows ?? []).map(rowToInterviewQuestion),
+  };
 }

@@ -60,6 +60,13 @@ function RootLayoutNav() {
               headerBackTitle: '面试',
             }}
           />
+          <Stack.Screen
+            name="interview/new"
+            options={{
+              title: '新建面试准备',
+              headerBackTitle: '面试',
+            }}
+          />
         </Stack.Protected>
       </Stack>
     </ThemeProvider>

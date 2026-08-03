@@ -13,6 +13,13 @@ let preferredVoicePromise: Promise<Voice | null> | null = null;
 // highest id is allowed to stop/start playback once its async work resolves.
 let latestRequestId = 0;
 
+export type PronunciationCallbacks = {
+  onStart?: () => void;
+  onDone?: () => void;
+  onStopped?: () => void;
+  onError?: () => void;
+};
+
 function pickPreferredVoice(voices: Voice[]): Voice | null {
   for (const language of PREFERRED_LANGUAGES) {
     const matches = voices.filter(
@@ -43,9 +50,14 @@ async function resolvePreferredVoice(): Promise<Voice | null> {
  *
  * If this is called again before the previous call's voice lookup resolves,
  * only the most recent call is allowed to actually stop/start playback, so
- * rapid repeated taps end up playing just the last word requested.
+ * rapid repeated taps end up playing just the last word requested. The
+ * superseded call's `onStopped` callback still fires, so a caller tracking
+ * "is this text currently playing" UI state never gets stuck.
  */
-export async function playPronunciation(text: string): Promise<void> {
+export async function playPronunciation(
+  text: string,
+  callbacks?: PronunciationCallbacks,
+): Promise<void> {
   if (!text) {
     return;
   }
@@ -57,6 +69,7 @@ export async function playPronunciation(text: string): Promise<void> {
 
     if (requestId !== latestRequestId) {
       // A newer request started while we were resolving the voice; drop this one.
+      callbacks?.onStopped?.();
       return;
     }
 
@@ -64,6 +77,7 @@ export async function playPronunciation(text: string): Promise<void> {
 
     if (requestId !== latestRequestId) {
       // A newer request started while we were stopping playback; drop this one.
+      callbacks?.onStopped?.();
       return;
     }
 
@@ -71,11 +85,38 @@ export async function playPronunciation(text: string): Promise<void> {
       rate: LEARNING_SPEECH_RATE,
       voice: voice?.identifier,
       language: voice ? undefined : 'en-US',
-      onError: (error) => {
-        console.warn('[pronunciationService] playback error:', error);
+      onStart: () => {
+        callbacks?.onStart?.();
+      },
+      onDone: () => {
+        callbacks?.onDone?.();
+      },
+      onStopped: () => {
+        callbacks?.onStopped?.();
+      },
+      onError: () => {
+        console.warn('[pronunciationService] playback failed.');
+        callbacks?.onError?.();
       },
     });
-  } catch (error) {
-    console.warn('[pronunciationService] failed to speak text:', text, error);
+  } catch {
+    console.warn('[pronunciationService] playback failed.');
+    callbacks?.onError?.();
+  }
+}
+
+/**
+ * Stops any in-progress or pending speech. Bumping `latestRequestId` first —
+ * synchronously, before the `await` — immediately invalidates any
+ * `playPronunciation` call still resolving its voice lookup, so it can never
+ * start playing after this resolves. Never throws.
+ */
+export async function stopPronunciation(): Promise<void> {
+  latestRequestId += 1;
+
+  try {
+    await Speech.stop();
+  } catch {
+    console.warn('[pronunciationService] playback failed.');
   }
 }

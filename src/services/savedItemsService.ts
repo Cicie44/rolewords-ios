@@ -1,6 +1,11 @@
 import { supabase } from '@/src/services/supabase';
 import type { Database } from '@/src/types/database';
-import type { CreateSavedItemInput, SavedItem } from '@/src/types/savedItem';
+import type {
+  CreateSavedItemInput,
+  GenerateSavedItemChineseTextInput,
+  SavedItem,
+  SavedItemType,
+} from '@/src/types/savedItem';
 
 type SavedItemRow = Database['public']['Tables']['saved_items']['Row'];
 
@@ -179,4 +184,101 @@ export async function deleteSavedItems(ids: string[]): Promise<void> {
   if (error) {
     throw new Error('Failed to delete items.');
   }
+}
+
+const SAVED_ITEM_TYPES: readonly SavedItemType[] = ['word', 'phrase', 'sentence'];
+
+function isSavedItemType(value: unknown): value is SavedItemType {
+  return typeof value === 'string' && (SAVED_ITEM_TYPES as readonly string[]).includes(value);
+}
+
+const MAX_CHINESE_TEXT_CONTENT_LENGTH = 4000;
+const MAX_CHINESE_TEXT_CONTEXT_LENGTH = 1000;
+const MAX_GENERATED_CHINESE_TEXT_LENGTH = 4000;
+
+// Same CJK ranges the Edge Function itself checks — CJK Unified Ideographs
+// (U+4E00-U+9FFF), Extension A (U+3400-U+4DBF), and CJK Compatibility
+// Ideographs (U+F900-U+FAFF) — enough to sanity-check the result actually
+// contains Chinese text. Written with explicit \u escapes (rather than
+// pasted literal characters) so the exact code points can't be silently
+// altered by any text-normalization step.
+const CHINESE_TEXT_REGEX = /[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/;
+
+/**
+ * Invokes the deployed generate-saved-item-chinese-text Edge Function to get
+ * a Simplified Chinese gloss/translation for one piece of English content
+ * the user is about to bookmark. Auth is handled entirely by the shared
+ * Supabase client's active session — no Authorization header or Function URL
+ * is built by hand here, no userId is ever sent in the body, and no OpenAI
+ * credentials ever pass through this app.
+ *
+ * This only generates and returns text — it never calls saveSavedItem, never
+ * touches saved_items, and never matches against the local vocabulary. The
+ * caller decides what (if anything) to do with the result.
+ */
+export async function generateSavedItemChineseText(
+  input: GenerateSavedItemChineseTextInput,
+): Promise<string> {
+  const trimmedContent = input.content.trim();
+  if (trimmedContent.length === 0) {
+    throw new Error('Content is required.');
+  }
+  if (trimmedContent.length > MAX_CHINESE_TEXT_CONTENT_LENGTH) {
+    throw new Error('Content is too long.');
+  }
+
+  if (!isSavedItemType(input.itemType)) {
+    throw new Error('Invalid saved item type.');
+  }
+
+  const trimmedContext = input.context?.trim();
+  // An empty-string context is treated the same as no context at all.
+  const context = trimmedContext && trimmedContext.length > 0 ? trimmedContext : undefined;
+  if (context && context.length > MAX_CHINESE_TEXT_CONTEXT_LENGTH) {
+    throw new Error('Context is too long.');
+  }
+
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+
+  if (!session) {
+    throw new Error('Not authenticated.');
+  }
+
+  const { data, error } = await supabase.functions.invoke('generate-saved-item-chinese-text', {
+    body: {
+      content: trimmedContent,
+      itemType: input.itemType,
+      ...(context ? { context } : {}),
+    },
+  });
+
+  // The Function's response shape is never trusted from its static type —
+  // every field is re-checked at runtime before it reaches the UI. Every
+  // failure path below collapses to the same generic message: no Function
+  // error, network error, or malformed-response detail is ever surfaced to
+  // the caller, and neither the English content/context nor the generated
+  // Chinese text is ever logged.
+  if (error || !data || typeof data !== 'object') {
+    throw new Error('Failed to generate Chinese text.');
+  }
+
+  const chineseText = (data as Record<string, unknown>).chineseText;
+  if (typeof chineseText !== 'string') {
+    throw new Error('Failed to generate Chinese text.');
+  }
+
+  const trimmedChineseText = chineseText.trim();
+  if (
+    trimmedChineseText.length === 0 ||
+    trimmedChineseText.length > MAX_GENERATED_CHINESE_TEXT_LENGTH
+  ) {
+    throw new Error('Failed to generate Chinese text.');
+  }
+  if (!CHINESE_TEXT_REGEX.test(trimmedChineseText)) {
+    throw new Error('Failed to generate Chinese text.');
+  }
+
+  return trimmedChineseText;
 }

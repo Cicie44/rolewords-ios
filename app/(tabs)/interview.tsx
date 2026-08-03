@@ -1,220 +1,161 @@
-import * as DocumentPicker from 'expo-document-picker';
-import { router } from 'expo-router';
-import { useRef, useState } from 'react';
-import {
-  ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
+import { router, useFocusEffect } from 'expo-router';
+import { SymbolView } from 'expo-symbols';
+import { useCallback, useState } from 'react';
+import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 
-import {
-  createInterviewDraft,
-  updateInterviewDraft,
-  uploadInterviewCv,
-} from '@/src/services/interviewService';
-import type { CreateInterviewDraftInput } from '@/src/types/interview';
+import { fetchInterviewSessions } from '@/src/services/interviewService';
+import type { InterviewSessionStatus, InterviewSessionSummary } from '@/src/types/interview';
 
-type PickedFile = {
-  uri: string;
-  name: string;
+type HistoryLoadState = 'loading' | 'loaded' | 'error';
+
+const STATUS_LABELS: Record<InterviewSessionStatus, string> = {
+  draft: '草稿',
+  questions_ready: '已生成问题',
+  answers_ready: '已生成答案',
+  completed: '已完成',
+  failed: '失败',
 };
 
+function formatSessionDate(isoString: string): string {
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+  return date.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' });
+}
+
 export default function InterviewScreen() {
-  const [jobTitle, setJobTitle] = useState('');
-  const [companyName, setCompanyName] = useState('');
-  const [jobDescription, setJobDescription] = useState('');
-  const [pickedFile, setPickedFile] = useState<PickedFile | null>(null);
-  const [draftId, setDraftId] = useState<string | null>(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const submittingRef = useRef(false);
+  const [sessions, setSessions] = useState<InterviewSessionSummary[]>([]);
+  const [loadState, setLoadState] = useState<HistoryLoadState>('loading');
+  const [retryToken, setRetryToken] = useState(0);
 
-  const trimmedJobTitle = jobTitle.trim();
-  const trimmedCompanyName = companyName.trim();
-  const canSubmit =
-    trimmedJobTitle.length > 0 &&
-    trimmedCompanyName.length > 0 &&
-    pickedFile !== null &&
-    !isSubmitting;
+  // Refreshes every time the "面试" tab regains focus (e.g. returning from
+  // the new-session form or a detail page). `retryToken` is a dependency
+  // purely so the retry button can force a reload: useFocusEffect's internal
+  // effect depends on this callback's identity, so bumping the token makes
+  // it clean up the in-flight request (via the returned cleanup) and
+  // immediately restart — calling loadSessions() directly would not do
+  // this, since its cleanup is only ever wired up through useFocusEffect.
+  const loadSessions = useCallback(() => {
+    let isActive = true;
+    setLoadState('loading');
 
-  const handlePickFile = async () => {
-    try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: 'application/pdf',
-        copyToCacheDirectory: true,
+    fetchInterviewSessions()
+      .then((fetched) => {
+        if (!isActive) {
+          return;
+        }
+        setSessions(fetched);
+        setLoadState('loaded');
+      })
+      .catch(() => {
+        if (!isActive) {
+          return;
+        }
+        setLoadState('error');
       });
 
-      if (result.canceled || result.assets.length === 0) {
-        return;
-      }
-
-      const asset = result.assets[0];
-      setPickedFile({ uri: asset.uri, name: asset.name });
-      setErrorMessage(null);
-    } catch {
-      setErrorMessage('无法选择 PDF 文件，请重试。');
-    }
-  };
-
-  const resetForm = () => {
-    setJobTitle('');
-    setCompanyName('');
-    setJobDescription('');
-    setPickedFile(null);
-    setDraftId(null);
-  };
-
-  const handleSubmit = async () => {
-    if (submittingRef.current) {
-      return;
-    }
-
-    if (!canSubmit || !pickedFile) {
-      return;
-    }
-
-    const trimmedJobDescription = jobDescription.trim();
-    const normalizedInput: CreateInterviewDraftInput = {
-      jobTitle: trimmedJobTitle,
-      companyName: trimmedCompanyName,
-      jobDescription: trimmedJobDescription.length > 0 ? trimmedJobDescription : undefined,
+    return () => {
+      isActive = false;
     };
+  }, [retryToken]);
 
-    submittingRef.current = true;
-    setIsSubmitting(true);
-    setErrorMessage(null);
+  useFocusEffect(loadSessions);
 
-    try {
-      let interviewSessionId = draftId;
+  const handlePressNew = () => {
+    router.push('/interview/new');
+  };
 
-      if (!interviewSessionId) {
-        const draft = await createInterviewDraft(normalizedInput);
-        interviewSessionId = draft.id;
-        setDraftId(draft.id);
-      } else {
-        // Uploading may fail after this point, so re-sync the draft with
-        // whatever the user has edited since the previous attempt before
-        // attaching the CV to it.
-        await updateInterviewDraft(interviewSessionId, normalizedInput);
-      }
-
-      const fileResponse = await fetch(pickedFile.uri);
-      const data = await fileResponse.arrayBuffer();
-
-      await uploadInterviewCv({
-        interviewSessionId,
-        fileName: pickedFile.name,
-        data,
-      });
-
-      resetForm();
-
-      router.push({
-        pathname: '/interview/[id]',
-        params: {
-          id: interviewSessionId,
-          jobTitle: normalizedInput.jobTitle,
-          companyName: normalizedInput.companyName,
-        },
-      });
-    } catch {
-      setErrorMessage('提交失败，请重试。');
-    } finally {
-      setIsSubmitting(false);
-      submittingRef.current = false;
-    }
+  const handlePressSession = (item: InterviewSessionSummary) => {
+    router.push({
+      pathname: '/interview/[id]',
+      params: {
+        id: item.id,
+        jobTitle: item.jobTitle,
+        companyName: item.companyName,
+      },
+    });
   };
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-      <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
-        <View style={styles.card}>
-          <Text style={styles.label}>岗位名称</Text>
-          <TextInput
-            value={jobTitle}
-            onChangeText={setJobTitle}
-            placeholder="例如：iOS Developer"
-            placeholderTextColor="#999"
-            editable={!isSubmitting}
-            accessibilityLabel="岗位名称"
-            style={styles.input}
-          />
+    <View style={styles.container}>
+      <Pressable
+        onPress={handlePressNew}
+        accessibilityRole="button"
+        accessibilityLabel="新建面试准备"
+        style={styles.newButton}>
+        <Text style={styles.newButtonText}>新建面试准备</Text>
+      </Pressable>
 
-          <Text style={styles.label}>公司名称</Text>
-          <TextInput
-            value={companyName}
-            onChangeText={setCompanyName}
-            placeholder="例如：ACME Inc."
-            placeholderTextColor="#999"
-            editable={!isSubmitting}
-            accessibilityLabel="公司名称"
-            style={styles.input}
-          />
+      {loadState === 'loading' && (
+        <View style={styles.centerContent}>
+          <ActivityIndicator />
+          <Text style={styles.statusText}>正在加载面试记录…</Text>
+        </View>
+      )}
 
-          <Text style={styles.label}>Job Description（选填）</Text>
-          <TextInput
-            value={jobDescription}
-            onChangeText={setJobDescription}
-            placeholder="粘贴职位描述（可选）"
-            placeholderTextColor="#999"
-            multiline
-            editable={!isSubmitting}
-            accessibilityLabel="Job Description"
-            style={[styles.input, styles.multilineInput]}
-          />
-
-          <Text style={styles.label}>简历 CV（PDF）</Text>
-          {pickedFile ? (
-            <View style={styles.fileRow}>
-              <Text style={styles.fileName} numberOfLines={1}>
-                {pickedFile.name}
-              </Text>
-              <Pressable
-                onPress={handlePickFile}
-                disabled={isSubmitting}
-                accessibilityRole="button"
-                accessibilityLabel="重新选择 PDF"
-                hitSlop={8}
-                style={styles.fileChangeButton}>
-                <Text style={styles.fileChangeButtonText}>重新选择</Text>
-              </Pressable>
-            </View>
-          ) : (
-            <Pressable
-              onPress={handlePickFile}
-              disabled={isSubmitting}
-              accessibilityRole="button"
-              accessibilityLabel="选择 PDF 简历"
-              style={styles.pickButton}>
-              <Text style={styles.pickButtonText}>选择 PDF 文件</Text>
-            </Pressable>
-          )}
-
-          {errorMessage && <Text style={styles.error}>{errorMessage}</Text>}
-
+      {loadState === 'error' && (
+        <View style={styles.centerContent}>
+          <Text style={styles.errorText}>面试记录加载失败，请检查网络。</Text>
           <Pressable
-            onPress={handleSubmit}
-            disabled={!canSubmit}
+            onPress={() => setRetryToken((n) => n + 1)}
             accessibilityRole="button"
-            accessibilityLabel="创建面试准备"
-            style={[styles.submitButton, !canSubmit && styles.submitButtonDisabled]}>
-            {isSubmitting ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <Text style={styles.submitButtonText}>创建面试准备</Text>
-            )}
+            accessibilityLabel="重试加载面试记录"
+            style={styles.retryButton}>
+            <Text style={styles.retryButtonText}>重试</Text>
           </Pressable>
         </View>
-      </ScrollView>
-    </KeyboardAvoidingView>
+      )}
+
+      {loadState === 'loaded' && sessions.length === 0 && (
+        <View style={styles.centerContent}>
+          <Text style={styles.statusText}>还没有面试记录</Text>
+          <Text style={styles.statusSubText}>创建一次面试准备后，会显示在这里。</Text>
+        </View>
+      )}
+
+      {loadState === 'loaded' && sessions.length > 0 && (
+        <>
+          <View style={styles.historyHeader}>
+            <Text style={styles.historyTitle}>历史记录</Text>
+            <Text style={styles.historyCount}>共 {sessions.length} 条</Text>
+          </View>
+
+          <FlatList
+            style={styles.list}
+            contentContainerStyle={styles.listContent}
+            data={sessions}
+            keyExtractor={(item) => item.id}
+            ItemSeparatorComponent={() => <View style={styles.separator} />}
+            renderItem={({ item }) => (
+              <Pressable
+                onPress={() => handlePressSession(item)}
+                accessibilityRole="button"
+                accessibilityLabel={`查看 ${item.companyName} ${item.jobTitle} 详情`}
+                style={styles.row}>
+                <View style={styles.rowTextGroup}>
+                  <Text style={styles.companyName} numberOfLines={1}>
+                    {item.companyName}
+                  </Text>
+                  <Text style={styles.jobTitle} numberOfLines={1}>
+                    {item.jobTitle}
+                  </Text>
+                  <View style={styles.rowMetaRow}>
+                    <Text style={styles.rowMeta}>{STATUS_LABELS[item.status]}</Text>
+                    <Text style={styles.rowMeta}>{formatSessionDate(item.createdAt)}</Text>
+                  </View>
+                </View>
+                <SymbolView
+                  name={{ ios: 'chevron.right', android: 'chevron_right', web: 'chevron_right' }}
+                  tintColor="#c7c7cc"
+                  size={14}
+                />
+              </Pressable>
+            )}
+          />
+        </>
+      )}
+    </View>
   );
 }
 
@@ -222,93 +163,116 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#F2F2F7',
-  },
-  scrollContent: {
-    padding: 16,
     paddingTop: 14,
+    paddingHorizontal: 16,
   },
-  card: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 16,
-    gap: 8,
-  },
-  label: {
-    fontSize: 13,
-    color: '#8e8e93',
-    marginTop: 12,
-  },
-  input: {
-    minHeight: 44,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#c6c6c8',
+  newButton: {
+    minHeight: 48,
     borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    fontSize: 16,
-    color: '#000',
-  },
-  multilineInput: {
-    minHeight: 88,
-    textAlignVertical: 'top',
-  },
-  fileRow: {
-    flexDirection: 'row',
+    backgroundColor: '#2f95dc',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    minHeight: 44,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#c6c6c8',
-    borderRadius: 10,
-    paddingHorizontal: 14,
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  newButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  centerContent: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
     gap: 12,
   },
-  fileName: {
-    flex: 1,
+  statusText: {
     fontSize: 15,
-    color: '#000',
+    color: '#8e8e93',
+    textAlign: 'center',
   },
-  fileChangeButton: {
-    minHeight: 44,
-    justifyContent: 'center',
+  statusSubText: {
+    fontSize: 13,
+    color: '#8e8e93',
+    textAlign: 'center',
   },
-  fileChangeButtonText: {
-    fontSize: 15,
-    color: '#2f95dc',
-    fontWeight: '600',
-  },
-  pickButton: {
-    minHeight: 44,
-    borderRadius: 10,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#2f95dc',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  pickButtonText: {
-    fontSize: 16,
-    color: '#2f95dc',
-    fontWeight: '600',
-  },
-  error: {
+  errorText: {
     fontSize: 13,
     color: '#d9534f',
-    marginTop: 8,
+    textAlign: 'center',
   },
-  submitButton: {
+  retryButton: {
     minHeight: 44,
     borderRadius: 10,
     backgroundColor: '#2f95dc',
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 16,
+    paddingHorizontal: 16,
   },
-  submitButtonDisabled: {
-    opacity: 0.5,
-  },
-  submitButtonText: {
+  retryButtonText: {
     color: '#fff',
     fontSize: 16,
     fontWeight: '600',
+  },
+  historyHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  historyTitle: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#000',
+  },
+  historyCount: {
+    fontSize: 13,
+    color: '#8e8e93',
+  },
+  list: {
+    flex: 1,
+  },
+  // Only the actual rows get the white rounded background — since this
+  // sizes to content (no flexGrow), it never stretches past the last row,
+  // and any leftover space below stays the page's gray.
+  listContent: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    minHeight: 76,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    gap: 12,
+    backgroundColor: '#fff',
+  },
+  separator: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: '#c6c6c8',
+    marginLeft: 16,
+  },
+  rowTextGroup: {
+    flex: 1,
+    gap: 4,
+  },
+  companyName: {
+    fontSize: 17,
+    fontWeight: '600',
+    color: '#000',
+  },
+  jobTitle: {
+    fontSize: 14,
+    color: '#3c3c43',
+  },
+  rowMetaRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 2,
+  },
+  rowMeta: {
+    fontSize: 12,
+    color: '#8e8e93',
   },
 });

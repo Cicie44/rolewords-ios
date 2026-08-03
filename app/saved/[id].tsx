@@ -1,10 +1,14 @@
-import { useLocalSearchParams } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { sampleVocabulary } from '@/src/data/sampleVocabulary';
-import { playPronunciation } from '@/src/services/pronunciationService';
+import {
+  playPronunciation,
+  stopPronunciation,
+  type PronunciationCallbacks,
+} from '@/src/services/pronunciationService';
 import { fetchSavedItem } from '@/src/services/savedItemsService';
 import type { SavedItem, SavedItemSourceType, SavedItemType } from '@/src/types/savedItem';
 
@@ -31,6 +35,14 @@ export default function SavedItemDetailScreen() {
   const [loadState, setLoadState] = useState<LoadState>('loading');
   const [retryToken, setRetryToken] = useState(0);
   const lastAutoPlayedIdRef = useRef<string | null>(null);
+
+  // Shared playback state for whichever single piece of text this detail
+  // page is currently reading aloud (the matched word, or the raw saved
+  // content). `isPlayingRef` is the synchronous source of truth used inside
+  // handlers — `isPlaying` state only drives the rendered icon.
+  const [isPlaying, setIsPlaying] = useState(false);
+  const isPlayingRef = useRef(false);
+  const playbackTokenRef = useRef(0);
 
   useEffect(() => {
     if (!itemId) {
@@ -65,6 +77,82 @@ export default function SavedItemDetailScreen() {
     };
   }, [itemId, retryToken]);
 
+  // Starts playback under a fresh token. `isPlayingRef`/`isPlaying` flip to
+  // true synchronously (before the async voice lookup even begins) so a
+  // user tapping the button again immediately after can still stop it.
+  // Every callback below only applies its result if its captured `token` is
+  // still the current one — a superseded/late callback from a previous
+  // request can never clobber a newer request's UI state.
+  const startPlayback = useCallback((text: string) => {
+    const token = (playbackTokenRef.current += 1);
+    isPlayingRef.current = true;
+    setIsPlaying(true);
+
+    const callbacks: PronunciationCallbacks = {
+      onStart: () => {
+        if (playbackTokenRef.current !== token) {
+          return;
+        }
+        isPlayingRef.current = true;
+        setIsPlaying(true);
+      },
+      onDone: () => {
+        if (playbackTokenRef.current !== token) {
+          return;
+        }
+        isPlayingRef.current = false;
+        setIsPlaying(false);
+      },
+      onStopped: () => {
+        if (playbackTokenRef.current !== token) {
+          return;
+        }
+        isPlayingRef.current = false;
+        setIsPlaying(false);
+      },
+      onError: () => {
+        if (playbackTokenRef.current !== token) {
+          return;
+        }
+        isPlayingRef.current = false;
+        setIsPlaying(false);
+      },
+    };
+
+    void playPronunciation(text, callbacks);
+  }, []);
+
+  // `isPlayingRef` (not the async `isPlaying` state) gates this so two rapid
+  // taps can never both read "not playing" and both start playback.
+  const handleTogglePlayback = useCallback(
+    (text: string) => {
+      if (isPlayingRef.current) {
+        playbackTokenRef.current += 1;
+        isPlayingRef.current = false;
+        setIsPlaying(false);
+        void stopPronunciation();
+        return;
+      }
+      startPlayback(text);
+    },
+    [startPlayback],
+  );
+
+  // Stops playback whenever this screen loses focus, is unmounted, or
+  // navigates to a different saved item while staying mounted (itemId is a
+  // dependency of this callback, so React Navigation's focus effect tears
+  // down and re-registers whenever it changes while still focused).
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        playbackTokenRef.current += 1;
+        isPlayingRef.current = false;
+        setIsPlaying(false);
+        void stopPronunciation();
+      };
+    }, [itemId]),
+  );
+
   const vocabularyItem =
     savedItem?.sourceType === 'learning' && savedItem.sourceId
       ? vocabularyById.get(savedItem.sourceId)
@@ -83,8 +171,10 @@ export default function SavedItemDetailScreen() {
     }
     lastAutoPlayedIdRef.current = savedItem.id;
 
-    void playPronunciation(vocabularyItem.pronunciationText ?? vocabularyItem.term);
-  }, [loadState, savedItem, vocabularyItem]);
+    startPlayback(vocabularyItem.pronunciationText ?? vocabularyItem.term);
+  }, [loadState, savedItem, vocabularyItem, startPlayback]);
+
+  const isLongFormContent = !vocabularyItem && savedItem?.itemType === 'sentence';
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
@@ -131,14 +221,20 @@ export default function SavedItemDetailScreen() {
                 )}
                 <Pressable
                   onPress={() =>
-                    playPronunciation(vocabularyItem.pronunciationText ?? vocabularyItem.term)
+                    handleTogglePlayback(vocabularyItem.pronunciationText ?? vocabularyItem.term)
                   }
                   accessibilityRole="button"
-                  accessibilityLabel={`播放 ${vocabularyItem.term} 的发音`}
+                  accessibilityLabel={
+                    isPlaying ? '停止朗读' : `播放 ${vocabularyItem.term} 的发音`
+                  }
                   hitSlop={8}
                   style={styles.speakerButton}>
                   <SymbolView
-                    name={{ ios: 'speaker.wave.2.fill', android: 'volume_up', web: 'volume_up' }}
+                    name={{
+                      ios: isPlaying ? 'stop.circle.fill' : 'speaker.wave.2.fill',
+                      android: isPlaying ? 'stop_circle' : 'volume_up',
+                      web: isPlaying ? 'stop_circle' : 'volume_up',
+                    }}
                     tintColor="#2f95dc"
                     size={20}
                   />
@@ -173,18 +269,57 @@ export default function SavedItemDetailScreen() {
                 {SOURCE_TYPE_LABELS[savedItem.sourceType]}
               </Text>
             </>
+          ) : isLongFormContent ? (
+            <>
+              <View style={styles.longFormHeaderRow}>
+                <Text style={styles.longFormLabel}>英文内容</Text>
+                <Pressable
+                  onPress={() => handleTogglePlayback(savedItem.content)}
+                  accessibilityRole="button"
+                  accessibilityLabel={isPlaying ? '停止朗读' : '朗读收藏内容'}
+                  hitSlop={8}
+                  style={styles.speakerButton}>
+                  <SymbolView
+                    name={{
+                      ios: isPlaying ? 'stop.circle.fill' : 'speaker.wave.2.fill',
+                      android: isPlaying ? 'stop_circle' : 'volume_up',
+                      web: isPlaying ? 'stop_circle' : 'volume_up',
+                    }}
+                    tintColor="#2f95dc"
+                    size={20}
+                  />
+                </Pressable>
+              </View>
+
+              <Text style={styles.longFormContent} selectable>
+                {savedItem.content}
+              </Text>
+
+              {savedItem.chineseText && (
+                <Text style={styles.meaning}>{savedItem.chineseText}</Text>
+              )}
+
+              <Text style={styles.metaLine}>
+                {ITEM_TYPE_LABELS[savedItem.itemType]} · 来源：
+                {SOURCE_TYPE_LABELS[savedItem.sourceType]}
+              </Text>
+            </>
           ) : (
             <>
               <View style={styles.pronunciationRow}>
                 <Text style={styles.term}>{savedItem.content}</Text>
                 <Pressable
-                  onPress={() => playPronunciation(savedItem.content)}
+                  onPress={() => handleTogglePlayback(savedItem.content)}
                   accessibilityRole="button"
-                  accessibilityLabel={`播放 ${savedItem.content} 的发音`}
+                  accessibilityLabel={isPlaying ? '停止朗读' : `播放 ${savedItem.content} 的发音`}
                   hitSlop={8}
                   style={styles.speakerButton}>
                   <SymbolView
-                    name={{ ios: 'speaker.wave.2.fill', android: 'volume_up', web: 'volume_up' }}
+                    name={{
+                      ios: isPlaying ? 'stop.circle.fill' : 'speaker.wave.2.fill',
+                      android: isPlaying ? 'stop_circle' : 'volume_up',
+                      web: isPlaying ? 'stop_circle' : 'volume_up',
+                    }}
                     tintColor="#2f95dc"
                     size={20}
                   />
@@ -255,6 +390,7 @@ const styles = StyleSheet.create({
     fontSize: 26,
     fontWeight: '700',
     color: '#000',
+    flexShrink: 1,
   },
   pronunciationRow: {
     flexDirection: 'row',
@@ -318,5 +454,22 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#8e8e93',
     marginTop: 16,
+  },
+  longFormHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  longFormLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#8e8e93',
+  },
+  longFormContent: {
+    fontSize: 17,
+    lineHeight: 26,
+    fontWeight: '400',
+    color: '#000',
   },
 });

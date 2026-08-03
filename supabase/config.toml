@@ -392,6 +392,19 @@ enabled = true
 # a service role, so this must stay true.
 verify_jwt = true
 
+[functions.generate-interview-answers]
+enabled = true
+# Same requirement as generate-interview-questions above: only ever acts
+# through ctx.supabase, never a service role, so this must stay true.
+verify_jwt = true
+
+[functions.generate-saved-item-chinese-text]
+enabled = true
+# Requires a valid signed-in user's JWT; this function doesn't touch the
+# database at all, but still must only ever be callable by an authenticated
+# user, never anonymously.
+verify_jwt = true
+
 [analytics]
 enabled = true
 port = 54327

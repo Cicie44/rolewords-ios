@@ -19,3 +19,9 @@ export interface CreateSavedItemInput {
   sourceType: SavedItemSourceType;
   sourceId?: string;
 }
+
+export interface GenerateSavedItemChineseTextInput {
+  content: string;
+  itemType: SavedItemType;
+  context?: string;
+}
