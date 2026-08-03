@@ -1,0 +1,122 @@
+[
+  {
+    "id": "pm-milestone",
+    "term": "milestone",
+    "chineseMeaning": "里程碑",
+    "partOfSpeech": "n.",
+    "ipa": "ˈmaɪlˌstoʊn",
+    "englishDefinition": "A significant point or event marking progress in a project.",
+    "exampleSentence": "Reaching the beta release is our next major milestone.",
+    "exampleTranslation": "发布测试版是我们下一个重要的里程碑。",
+    "wordBookId": "project-manager",
+    "tags": ["planning", "workplace"]
+  },
+  {
+    "id": "pm-deliverable",
+    "term": "deliverable",
+    "chineseMeaning": "交付物",
+    "partOfSpeech": "n.",
+    "ipa": "dɪˈlɪvərəbəl",
+    "englishDefinition": "A tangible or intangible output produced as part of a project.",
+    "exampleSentence": "The final deliverable includes both the report and the source files.",
+    "exampleTranslation": "最终交付物包括报告和源文件。",
+    "wordBookId": "project-manager",
+    "tags": ["planning", "workplace"]
+  },
+  {
+    "id": "pm-scope-creep",
+    "term": "scope creep",
+    "chineseMeaning": "范围蔓延（需求不断扩大）",
+    "partOfSpeech": "n.",
+    "ipa": "skoʊp kriːp",
+    "englishDefinition": "Uncontrolled expansion of a project scope after it has started.",
+    "exampleSentence": "Without a change process, scope creep can quickly derail the timeline.",
+    "exampleTranslation": "如果没有变更流程，范围蔓延会很快打乱项目进度。",
+    "wordBookId": "project-manager",
+    "tags": ["risk", "planning"]
+  },
+  {
+    "id": "pm-risk-mitigation",
+    "term": "risk mitigation",
+    "chineseMeaning": "风险缓解",
+    "partOfSpeech": "n.",
+    "ipa": "rɪsk ˌmɪtɪˈɡeɪʃən",
+    "englishDefinition": "Actions taken to reduce the likelihood or impact of a risk.",
+    "exampleSentence": "Our risk mitigation plan covers vendor delays and staff turnover.",
+    "exampleTranslation": "我们的风险缓解计划涵盖了供应商延误和人员流动的情况。",
+    "wordBookId": "project-manager",
+    "tags": ["risk", "planning"]
+  },
+  {
+    "id": "pm-sprint",
+    "term": "sprint",
+    "chineseMeaning": "冲刺（迭代周期）",
+    "partOfSpeech": "n.",
+    "ipa": "sprɪnt",
+    "englishDefinition": "A fixed, short time period in which a team completes a set of work.",
+    "exampleSentence": "We review progress at the end of every two-week sprint.",
+    "exampleTranslation": "我们在每两周一次的冲刺结束时回顾进度。",
+    "wordBookId": "project-manager",
+    "tags": ["agile", "workplace"]
+  },
+  {
+    "id": "pm-backlog",
+    "term": "backlog",
+    "chineseMeaning": "待办事项列表；产品积压",
+    "partOfSpeech": "n.",
+    "ipa": "ˈbækˌlɔɡ",
+    "englishDefinition": "A list of tasks or features waiting to be worked on.",
+    "exampleSentence": "We groomed the backlog before sprint planning to reprioritize the top items.",
+    "exampleTranslation": "我们在迭代规划之前梳理了待办事项列表，重新排列了优先级最高的几项。",
+    "wordBookId": "project-manager",
+    "tags": ["planning", "agile"]
+  },
+  {
+    "id": "pm-resource-allocation",
+    "term": "resource allocation",
+    "chineseMeaning": "资源分配",
+    "partOfSpeech": "n.",
+    "ipa": "ˈrisɔrs ˌæləˈkeɪʃən",
+    "englishDefinition": "The process of assigning available people, time, or budget to specific tasks.",
+    "exampleSentence": "Poor resource allocation left two teams short-staffed during the launch.",
+    "exampleTranslation": "资源分配不当导致两个团队在上线期间人手不足。",
+    "wordBookId": "project-manager",
+    "tags": ["planning", "workplace"]
+  },
+  {
+    "id": "pm-timeline",
+    "term": "timeline",
+    "chineseMeaning": "时间线；进度计划",
+    "partOfSpeech": "n.",
+    "ipa": "ˈtaɪmˌlaɪn",
+    "englishDefinition": "A schedule that shows when tasks or milestones should happen.",
+    "exampleSentence": "The updated timeline pushes the release back by two weeks.",
+    "exampleTranslation": "更新后的时间线把发布日期推迟了两周。",
+    "wordBookId": "project-manager",
+    "tags": ["planning", "workplace"]
+  },
+  {
+    "id": "pm-blocker",
+    "term": "blocker",
+    "chineseMeaning": "阻碍因素；阻塞项",
+    "partOfSpeech": "n.",
+    "ipa": "ˈblɑkər",
+    "englishDefinition": "An issue that prevents work from progressing until it is resolved.",
+    "exampleSentence": "The API outage became a blocker for the whole integration team.",
+    "exampleTranslation": "API 中断成了整个集成团队工作受阻的一个阻碍因素。",
+    "wordBookId": "project-manager",
+    "tags": ["risk", "workplace"]
+  },
+  {
+    "id": "pm-stakeholder-alignment",
+    "term": "stakeholder alignment",
+    "chineseMeaning": "相关方共识；干系人对齐",
+    "partOfSpeech": "n.",
+    "ipa": "ˈsteɪkˌhoʊldər əˈlaɪnmənt",
+    "englishDefinition": "Shared agreement among stakeholders on goals, priorities, or decisions.",
+    "exampleSentence": "We scheduled an extra review to reach stakeholder alignment before launch.",
+    "exampleTranslation": "我们在上线前额外安排了一次评审，以达成相关方共识。",
+    "wordBookId": "project-manager",
+    "tags": ["communication", "workplace"]
+  }
+]

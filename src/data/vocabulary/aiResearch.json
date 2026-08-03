@@ -1,0 +1,122 @@
+[
+  {
+    "id": "ai-neural-network",
+    "term": "neural network",
+    "chineseMeaning": "神经网络",
+    "partOfSpeech": "n.",
+    "ipa": "ˈnʊrəl ˈnɛtˌwɜrk",
+    "englishDefinition": "A computing system of connected nodes loosely modeled on the brain.",
+    "exampleSentence": "The neural network was trained on millions of labeled images.",
+    "exampleTranslation": "这个神经网络是在数百万张已标注的图像上训练的。",
+    "wordBookId": "ai-research",
+    "tags": ["machine-learning", "model"]
+  },
+  {
+    "id": "ai-training-data",
+    "term": "training data",
+    "chineseMeaning": "训练数据",
+    "partOfSpeech": "n.",
+    "ipa": "ˈtreɪnɪŋ ˈdeɪtə",
+    "englishDefinition": "The dataset used to teach a machine learning model.",
+    "exampleSentence": "The quality of the training data directly affects model performance.",
+    "exampleTranslation": "训练数据的质量直接影响模型的表现。",
+    "wordBookId": "ai-research",
+    "tags": ["machine-learning", "data"]
+  },
+  {
+    "id": "ai-overfitting",
+    "term": "overfitting",
+    "chineseMeaning": "过拟合",
+    "partOfSpeech": "n.",
+    "ipa": "ˌoʊvərˈfɪtɪŋ",
+    "englishDefinition": "When a model learns the training data too closely and performs poorly on new data.",
+    "exampleSentence": "Adding dropout layers helped reduce overfitting on the small dataset.",
+    "exampleTranslation": "添加 dropout 层有助于减少在小数据集上的过拟合。",
+    "wordBookId": "ai-research",
+    "tags": ["machine-learning", "model"]
+  },
+  {
+    "id": "ai-inference",
+    "term": "inference",
+    "chineseMeaning": "推理（模型预测过程）",
+    "partOfSpeech": "n.",
+    "ipa": "ˈɪnfərəns",
+    "englishDefinition": "The process of using a trained model to make predictions.",
+    "exampleSentence": "Inference latency matters more than training time in production.",
+    "exampleTranslation": "在生产环境中，推理延迟比训练时间更重要。",
+    "wordBookId": "ai-research",
+    "tags": ["machine-learning", "deployment"]
+  },
+  {
+    "id": "ai-benchmark",
+    "term": "benchmark",
+    "chineseMeaning": "基准测试",
+    "partOfSpeech": "n.",
+    "ipa": "ˈbɛntʃˌmɑrk",
+    "englishDefinition": "A standard test used to compare the performance of models or systems.",
+    "exampleSentence": "The new model outperformed the previous one on every benchmark.",
+    "exampleTranslation": "新模型在每一项基准测试中都优于之前的模型。",
+    "wordBookId": "ai-research",
+    "tags": ["evaluation", "model"]
+  },
+  {
+    "id": "ai-fine-tuning",
+    "term": "fine-tuning",
+    "chineseMeaning": "微调",
+    "partOfSpeech": "n.",
+    "ipa": "ˈfaɪnˌtunɪŋ",
+    "englishDefinition": "Further training a pretrained model on a smaller, task-specific dataset.",
+    "exampleSentence": "Fine-tuning the base model on our support tickets improved accuracy significantly.",
+    "exampleTranslation": "在我们的工单数据上对基础模型进行微调，显著提升了准确率。",
+    "wordBookId": "ai-research",
+    "tags": ["machine-learning", "model"]
+  },
+  {
+    "id": "ai-embedding",
+    "term": "embedding",
+    "chineseMeaning": "嵌入（向量）",
+    "partOfSpeech": "n.",
+    "ipa": "ɪmˈbɛdɪŋ",
+    "englishDefinition": "A numeric vector representation that captures the meaning of text, images, or other data.",
+    "exampleSentence": "We store each document as an embedding to power semantic search.",
+    "exampleTranslation": "我们把每篇文档存成一个嵌入向量，用来实现语义搜索。",
+    "wordBookId": "ai-research",
+    "tags": ["machine-learning", "data"]
+  },
+  {
+    "id": "ai-transformer",
+    "term": "transformer",
+    "chineseMeaning": "Transformer 模型；变换器架构",
+    "partOfSpeech": "n.",
+    "ipa": "trænsˈfɔrmər",
+    "englishDefinition": "A neural network architecture that uses self-attention to process sequences.",
+    "exampleSentence": "Most modern language models are built on the transformer architecture.",
+    "exampleTranslation": "大多数现代语言模型都建立在 transformer 架构之上。",
+    "wordBookId": "ai-research",
+    "tags": ["machine-learning", "model"]
+  },
+  {
+    "id": "ai-validation-set",
+    "term": "validation set",
+    "chineseMeaning": "验证集",
+    "partOfSpeech": "n.",
+    "ipa": "ˌvæləˈdeɪʃən sɛt",
+    "englishDefinition": "A portion of data held out to tune a model and check its performance during training.",
+    "exampleSentence": "We track accuracy on the validation set after every training epoch.",
+    "exampleTranslation": "我们在每个训练轮次之后都会检查模型在验证集上的准确率。",
+    "wordBookId": "ai-research",
+    "tags": ["machine-learning", "data"]
+  },
+  {
+    "id": "ai-hyperparameter",
+    "term": "hyperparameter",
+    "chineseMeaning": "超参数",
+    "partOfSpeech": "n.",
+    "ipa": "ˌhaɪpərpəˈræmətər",
+    "englishDefinition": "A configuration value set before training that controls how a model learns.",
+    "exampleSentence": "Tuning the learning rate hyperparameter had the biggest impact on performance.",
+    "exampleTranslation": "调整学习率这个超参数对模型表现的影响最大。",
+    "wordBookId": "ai-research",
+    "tags": ["machine-learning", "model"]
+  }
+]
