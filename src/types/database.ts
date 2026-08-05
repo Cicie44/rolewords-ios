@@ -175,6 +175,104 @@ export type Database = {
         }
         Relationships: []
       }
+      vocabulary_items: {
+        Row: {
+          chinese_meaning: string
+          created_at: string
+          english_definition: string | null
+          example_sentence: string | null
+          example_translation: string | null
+          id: string
+          ipa: string | null
+          is_active: boolean
+          part_of_speech: string | null
+          pronunciation_text: string | null
+          sort_order: number
+          tags: string[]
+          term: string
+          updated_at: string
+          word_book_id: string
+        }
+        Insert: {
+          chinese_meaning: string
+          created_at?: string
+          english_definition?: string | null
+          example_sentence?: string | null
+          example_translation?: string | null
+          id: string
+          ipa?: string | null
+          is_active?: boolean
+          part_of_speech?: string | null
+          pronunciation_text?: string | null
+          sort_order: number
+          tags?: string[]
+          term: string
+          updated_at?: string
+          word_book_id: string
+        }
+        Update: {
+          chinese_meaning?: string
+          created_at?: string
+          english_definition?: string | null
+          example_sentence?: string | null
+          example_translation?: string | null
+          id?: string
+          ipa?: string | null
+          is_active?: boolean
+          part_of_speech?: string | null
+          pronunciation_text?: string | null
+          sort_order?: number
+          tags?: string[]
+          term?: string
+          updated_at?: string
+          word_book_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "vocabulary_items_word_book_id_fkey"
+            columns: ["word_book_id"]
+            isOneToOne: false
+            referencedRelation: "word_books"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      word_books: {
+        Row: {
+          category: string
+          chinese_title: string
+          created_at: string
+          description: string
+          id: string
+          is_active: boolean
+          sort_order: number
+          title: string
+          updated_at: string
+        }
+        Insert: {
+          category: string
+          chinese_title: string
+          created_at?: string
+          description: string
+          id: string
+          is_active?: boolean
+          sort_order: number
+          title: string
+          updated_at?: string
+        }
+        Update: {
+          category?: string
+          chinese_title?: string
+          created_at?: string
+          description?: string
+          id?: string
+          is_active?: boolean
+          sort_order?: number
+          title?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
