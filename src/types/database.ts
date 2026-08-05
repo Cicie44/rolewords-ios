@@ -138,6 +138,7 @@ export type Database = {
           created_at: string
           familiarity: string
           last_reviewed_at: string | null
+          needs_learn_reinforcement: boolean
           next_review_at: string | null
           recognition_count: number
           review_count: number
@@ -150,6 +151,7 @@ export type Database = {
           created_at?: string
           familiarity?: string
           last_reviewed_at?: string | null
+          needs_learn_reinforcement?: boolean
           next_review_at?: string | null
           recognition_count?: number
           review_count?: number
@@ -162,6 +164,7 @@ export type Database = {
           created_at?: string
           familiarity?: string
           last_reviewed_at?: string | null
+          needs_learn_reinforcement?: boolean
           next_review_at?: string | null
           recognition_count?: number
           review_count?: number

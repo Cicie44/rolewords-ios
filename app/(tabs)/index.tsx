@@ -7,16 +7,19 @@ import { sampleVocabulary } from '@/src/data/sampleVocabulary';
 import { wordBooks } from '@/src/data/wordBooks';
 import {
   LEARN_TARGET_COMPLETED,
+  MAX_PRESENTATIONS_PER_WORD,
   MAX_RECOGNITION_COUNT,
   REVIEW_GROUP_SIZE,
 } from '@/src/features/learning/constants';
 import { createLearnSession, applyLearnAnswer } from '@/src/features/learning/learnSession';
 import { createReviewSession, applyReviewAnswer, isReviewSessionComplete } from '@/src/features/learning/reviewSession';
 import {
+  compareByCarryoverOrder,
   compareByReviewUrgency,
   computeNextReviewAt,
   isDueForReview,
   isEligibleForReview,
+  isLearnCarryover,
   isNewWord,
   nextLearningStatus,
   nextRecognitionCount,
@@ -262,6 +265,17 @@ export default function LearnScreen() {
     () => wordsInBook.filter((item) => isNewWord(progressByItemId[item.id])).map((item) => item.id),
     [wordsInBook, progressByItemId],
   );
+
+  // Carryover: words already shown in a previous Learn group that neither
+  // completed nor graduated (needsLearnReinforcement === true). Sorted
+  // oldest-waiting-first; Array.sort's stability makes ties fall back to
+  // wordsInBook's own order, matching compareByCarryoverOrder's contract.
+  const carryoverWordIds = useMemo(() => {
+    return wordsInBook
+      .filter((item) => isLearnCarryover(progressByItemId[item.id]))
+      .sort((a, b) => compareByCarryoverOrder(progressByItemId[a.id], progressByItemId[b.id]))
+      .map((item) => item.id);
+  }, [wordsInBook, progressByItemId]);
 
   // Due-word definition: isEligibleForReview is the single source of truth
   // for "has real progress, isn't still new, and its nextReviewAt has
@@ -542,6 +556,7 @@ export default function LearnScreen() {
   const submitAnswer = async (
     familiarity: Familiarity,
     applyToSession: (recognitionCount: number) => void,
+    deriveNeedsLearnReinforcement: (recognitionCount: number) => boolean,
   ) => {
     if (!currentWord) return;
 
@@ -551,6 +566,7 @@ export default function LearnScreen() {
     const recognitionCount = nextRecognitionCount(familiarity, previous?.recognitionCount ?? 0);
     const status = nextLearningStatus(recognitionCount);
     const nextReviewAt = computeNextReviewAt(familiarity, recognitionCount, now);
+    const needsLearnReinforcement = deriveNeedsLearnReinforcement(recognitionCount);
 
     const nextProgress: UserWordProgress = {
       vocabularyItemId: wordId,
@@ -560,6 +576,7 @@ export default function LearnScreen() {
       reviewCount: (previous?.reviewCount ?? 0) + 1,
       lastReviewedAt: now.toISOString(),
       nextReviewAt,
+      needsLearnReinforcement,
     };
 
     const requestToken = sessionTokenRef.current;
@@ -604,14 +621,24 @@ export default function LearnScreen() {
 
     const wordId = currentWord.id;
     const activeSessionId = learnSession.sessionId;
+    // How many times this card has already been shown this group — the
+    // same value applyLearnAnswer uses to decide 'reinforced' vs
+    // 'graduated' — so the persisted needsLearnReinforcement flag always
+    // agrees with the in-memory scheduling outcome.
+    const presentationsSoFar = learnSession.presentationCounts[wordId] ?? 0;
 
-    await submitAnswer(familiarity, (recognitionCount) => {
-      setLearnSession((prev) => {
-        if (!prev || prev.sessionId !== activeSessionId) return prev;
-        const result = applyLearnAnswer(prev, wordId, familiarity, recognitionCount >= MAX_RECOGNITION_COUNT);
-        return result ? result.session : prev;
-      });
-    });
+    await submitAnswer(
+      familiarity,
+      (recognitionCount) => {
+        setLearnSession((prev) => {
+          if (!prev || prev.sessionId !== activeSessionId) return prev;
+          const result = applyLearnAnswer(prev, wordId, familiarity, recognitionCount >= MAX_RECOGNITION_COUNT);
+          return result ? result.session : prev;
+        });
+      },
+      (recognitionCount) =>
+        recognitionCount < MAX_RECOGNITION_COUNT && presentationsSoFar < MAX_PRESENTATIONS_PER_WORD,
+    );
   };
 
   const handleReviewChoice = async (familiarity: Familiarity) => {
@@ -628,23 +655,27 @@ export default function LearnScreen() {
     const wordId = currentWord.id;
     const activeSessionId = reviewSession.sessionId;
 
-    await submitAnswer(familiarity, () => {
-      setReviewSession((prev) => {
-        if (!prev || prev.sessionId !== activeSessionId) return prev;
-        const result = applyReviewAnswer(prev, wordId, familiarity);
-        return result ?? prev;
-      });
-    });
+    await submitAnswer(
+      familiarity,
+      () => {
+        setReviewSession((prev) => {
+          if (!prev || prev.sessionId !== activeSessionId) return prev;
+          const result = applyReviewAnswer(prev, wordId, familiarity);
+          return result ?? prev;
+        });
+      },
+      () => false,
+    );
   };
 
   const handleStartLearn = () => {
-    if (isSaving || newWordIds.length === 0) return;
+    if (isSaving || (newWordIds.length === 0 && carryoverWordIds.length === 0)) return;
     sessionTokenRef.current += 1;
     handledAnswerKeyRef.current = null;
     lastAutoPlayedKeyRef.current = null;
     setSaveError(null);
     setReviewSession(null);
-    setLearnSession(createLearnSession(selectedWordBookId, makeSessionId('learn'), newWordIds));
+    setLearnSession(createLearnSession(selectedWordBookId, makeSessionId('learn'), newWordIds, carryoverWordIds));
     setScreenMode('learn');
   };
 
@@ -775,19 +806,22 @@ export default function LearnScreen() {
           </View>
 
           <View style={styles.panelCard}>
-            <Text style={styles.panelCardTitle}>Learn 新词</Text>
-            {newWordIds.length > 0 ? (
-              <Text style={styles.panelCardLine}>剩余未学新词：{newWordIds.length} 个</Text>
-            ) : (
+            <Text style={styles.panelCardTitle}>Learn 新词与巩固</Text>
+            <Text style={styles.panelCardLine}>待学新词：{newWordIds.length} 个</Text>
+            <Text style={styles.panelCardLine}>待继续巩固：{carryoverWordIds.length} 个</Text>
+            {newWordIds.length === 0 && carryoverWordIds.length === 0 && (
               <Text style={styles.panelCardEmpty}>本词书新词已全部学完，去 Review 复习吧。</Text>
             )}
-            <Text style={styles.panelCardLine}>默认目标：完成 {LEARN_TARGET_COMPLETED} 个新词</Text>
+            <Text style={styles.panelCardLine}>默认目标：掌握 {LEARN_TARGET_COMPLETED} 个词</Text>
             <Pressable
               onPress={handleStartLearn}
-              disabled={newWordIds.length === 0}
+              disabled={newWordIds.length === 0 && carryoverWordIds.length === 0}
               accessibilityRole="button"
               accessibilityLabel="开始学习"
-              style={[styles.primaryButton, newWordIds.length === 0 && styles.disabledOpacity]}>
+              style={[
+                styles.primaryButton,
+                newWordIds.length === 0 && carryoverWordIds.length === 0 && styles.disabledOpacity,
+              ]}>
               <Text style={styles.primaryButtonText}>开始学习</Text>
             </Pressable>
           </View>
@@ -834,7 +868,7 @@ export default function LearnScreen() {
           </Text>
           <WordCard
             word={currentWord}
-            headerLabel={`完成 ${learnSession.completedWordIds.length} / ${LEARN_TARGET_COMPLETED} · 本组已见新词 ${learnSession.seenWordIds.length} 个`}
+            headerLabel={`完成 ${learnSession.completedWordIds.length} / ${LEARN_TARGET_COMPLETED} · 本组已见 ${learnSession.seenWordIds.length} 个词`}
             recognitionCount={progressByItemId[currentWord.id]?.recognitionCount ?? 0}
             isSaved={isCurrentWordSaved}
             isBookmarkBusy={isBookmarkBusy}
@@ -866,7 +900,7 @@ export default function LearnScreen() {
           <Text style={styles.summaryLine}>
             完成目标：{learnSession.completedWordIds.length} / {LEARN_TARGET_COMPLETED}
           </Text>
-          <Text style={styles.summaryLine}>本组见过的新词数量：{learnSession.seenWordIds.length}</Text>
+          <Text style={styles.summaryLine}>本组见过的词数量：{learnSession.seenWordIds.length}</Text>
           <Text style={styles.summaryLine}>卡片总展示次数：{learnSession.totalPresentationCount}</Text>
           <Text style={styles.summaryLine}>不认识选择次数：{learnSession.unknownCount}</Text>
           <Text style={styles.summaryLine}>模糊选择次数：{learnSession.fuzzyCount}</Text>
@@ -876,6 +910,15 @@ export default function LearnScreen() {
           <Text style={styles.example}>
             {learnSession.completedWordIds.length > 0
               ? learnSession.completedWordIds
+                  .map((id) => vocabularyById.get(id)?.term ?? id)
+                  .join('、')
+              : '暂无'}
+          </Text>
+
+          <Text style={styles.sectionLabel}>下组继续巩固</Text>
+          <Text style={styles.example}>
+            {learnSession.carryoverWordIds.length > 0
+              ? learnSession.carryoverWordIds
                   .map((id) => vocabularyById.get(id)?.term ?? id)
                   .join('、')
               : '暂无'}
@@ -891,6 +934,7 @@ export default function LearnScreen() {
           </Text>
 
           <Text style={styles.summaryLine}>当前词书剩余新词数量：{newWordIds.length}</Text>
+          <Text style={styles.summaryLine}>当前待继续巩固数量：{carryoverWordIds.length}</Text>
 
           <Text style={styles.hintText}>已经完成一组学习，休息一下再继续吧。</Text>
 
@@ -902,7 +946,7 @@ export default function LearnScreen() {
             <Text style={styles.restartButtonText}>完成本组，返回控制面板</Text>
           </Pressable>
 
-          {newWordIds.length > 0 && (
+          {(newWordIds.length > 0 || carryoverWordIds.length > 0) && (
             <Pressable
               onPress={handleStartLearn}
               accessibilityRole="button"

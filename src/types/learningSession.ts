@@ -53,7 +53,9 @@ export type LearnSession = {
   seenWordIds: string[];
   /** Words that reached recognitionCount 3 (mastered) this group. */
   completedWordIds: string[];
-  /** Difficult words that hit the per-word presentation cap (or were still unresolved when the group ended) and graduated to Review. */
+  /** Words shown this group that neither completed nor hit the per-word presentation cap before the group ended — the next Learn group must keep reinforcing them (persisted via needsLearnReinforcement). */
+  carryoverWordIds: string[];
+  /** Difficult words that hit the per-word presentation cap without completing — genuinely graduated to Review. */
   graduatedWordIds: string[];
   /** Total number of cards shown this group (can exceed uniqueSeenCount many times over). */
   totalPresentationCount: number;

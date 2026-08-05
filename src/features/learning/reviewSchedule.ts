@@ -65,10 +65,19 @@ export function computeNextReviewAt(
  * into Review via isEligibleForReview instead of reappearing in Learn.
  * This is the single place that decision is made; isDueForReview and the
  * page-level filters must not re-derive it independently.
+ *
+ * A row with needsLearnReinforcement === true is a Learn carryover
+ * regardless of what status/reviewCount say — this app's own writes never
+ * produce that combination alongside status 'new', but the check is made
+ * here (not in a page-level filter) so new/carryover/Review stay mutually
+ * exclusive by construction even for a malformed/legacy row.
  */
 export function isNewWord(progress: UserWordProgress | undefined): boolean {
   if (!progress) {
     return true;
+  }
+  if (progress.needsLearnReinforcement) {
+    return false;
   }
   if (progress.status !== 'new') {
     return false;
@@ -108,6 +117,12 @@ export function isDueForReview(progress: UserWordProgress, nowMs: number): boole
  * missing/invalid-nextReviewAt compatibility fallback in isDueForReview
  * only ever applies to genuinely studied (learning/mastered, or
  * new-with-review-activity) rows.
+ *
+ * A word with needsLearnReinforcement === true is a Learn carryover: it
+ * stays out of Review even once its nextReviewAt has passed, since it
+ * belongs to the next Learn group instead. Only once it completes or
+ * graduates (needsLearnReinforcement flips to false) can it become
+ * eligible here.
  */
 export function isEligibleForReview(progress: UserWordProgress | undefined, nowMs: number): boolean {
   if (!progress) {
@@ -116,7 +131,51 @@ export function isEligibleForReview(progress: UserWordProgress | undefined, nowM
   if (isNewWord(progress)) {
     return false;
   }
+  if (progress.needsLearnReinforcement) {
+    return false;
+  }
   return isDueForReview(progress, nowMs);
+}
+
+/**
+ * A word counts as a Learn carryover when it's an unresolved reinforcement
+ * task from a previous Learn group: it has been shown but hasn't reached
+ * the recognition streak, and hasn't hit the per-group presentation cap
+ * either (that would have already flipped needsLearnReinforcement to
+ * false). The recognitionCount check is defensive — this app's own writes
+ * never set needsLearnReinforcement true alongside a completed streak.
+ */
+export function isLearnCarryover(progress: UserWordProgress | undefined): boolean {
+  if (!progress) {
+    return false;
+  }
+  if (!progress.needsLearnReinforcement) {
+    return false;
+  }
+  return progress.recognitionCount < MAX_RECOGNITION_COUNT;
+}
+
+/**
+ * Sorts carryover words by how long they've been waiting: earliest
+ * lastReviewedAt first, missing/invalid timestamps sorting first of all.
+ * Ties (including all-missing-timestamp cases) rely on Array.sort's
+ * stability to fall back to the caller's original order, so passing an
+ * already word-book-ordered array yields "same time -> word book order".
+ */
+export function compareByCarryoverOrder(
+  aProgress: UserWordProgress | undefined,
+  bProgress: UserWordProgress | undefined,
+): number {
+  const toSortableMs = (progress: UserWordProgress | undefined): number => {
+    const raw = progress?.lastReviewedAt;
+    if (!raw) {
+      return Number.NEGATIVE_INFINITY;
+    }
+    const parsed = Date.parse(raw);
+    return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
+  };
+
+  return toSortableMs(aProgress) - toSortableMs(bProgress);
 }
 
 /**

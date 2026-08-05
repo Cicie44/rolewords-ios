@@ -15,10 +15,11 @@ type SelectedWordProgressRow = Pick<
   | 'recognition_count'
   | 'last_reviewed_at'
   | 'next_review_at'
+  | 'needs_learn_reinforcement'
 >;
 
 const SELECT_COLUMNS =
-  'vocabulary_item_id, status, familiarity, review_count, recognition_count, last_reviewed_at, next_review_at';
+  'vocabulary_item_id, status, familiarity, review_count, recognition_count, last_reviewed_at, next_review_at, needs_learn_reinforcement';
 
 // Converts one database row (snake_case) into the app's business type
 // (camelCase), turning nullable timestamps into undefined.
@@ -31,6 +32,7 @@ function rowToProgress(row: SelectedWordProgressRow): UserWordProgress {
     recognitionCount: row.recognition_count,
     lastReviewedAt: row.last_reviewed_at ?? undefined,
     nextReviewAt: row.next_review_at ?? undefined,
+    needsLearnReinforcement: row.needs_learn_reinforcement,
   };
 }
 
@@ -82,6 +84,7 @@ export async function saveWordProgress(progress: UserWordProgress): Promise<void
       recognition_count: progress.recognitionCount,
       last_reviewed_at: progress.lastReviewedAt ?? null,
       next_review_at: progress.nextReviewAt ?? null,
+      needs_learn_reinforcement: progress.needsLearnReinforcement,
       updated_at: new Date().toISOString(),
     },
     { onConflict: 'user_id,vocabulary_item_id' },

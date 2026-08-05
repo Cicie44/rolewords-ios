@@ -14,11 +14,11 @@ export const INITIAL_NEW_WORD_BOOTSTRAP_COUNT = 3;
 /** Once bootstrap ends, at most this many new words can be shown back-to-back before an eligible reinforcement task must be inserted. */
 export const MAX_CONSECUTIVE_NEW_CARDS = 2;
 
-/** Anti-fatigue cap: stop introducing new words once this many distinct words have been seen. */
-export const MAX_UNIQUE_SEEN_PER_GROUP = 15;
+/** Anti-fatigue cap: stop introducing new words once this many distinct words (new + carryover combined) have been seen this group. */
+export const MAX_UNIQUE_WORDS_PER_GROUP = 20;
 
 /** Anti-fatigue cap: end the group once this many cards have been shown in total. */
-export const MAX_TOTAL_PRESENTATIONS_PER_GROUP = 50;
+export const MAX_TOTAL_PRESENTATIONS_PER_GROUP = 75;
 
 /** Consecutive "known" streak required to mark a word mastered. */
 export const MAX_RECOGNITION_COUNT = 3;

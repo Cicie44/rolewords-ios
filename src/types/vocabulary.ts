@@ -35,4 +35,6 @@ export interface UserWordProgress {
   recognitionCount: number;
   lastReviewedAt?: string;
   nextReviewAt?: string;
+  /** True while this word is an unresolved Learn carryover: shown in Learn but not yet completed or graduated, so it must keep reinforcing in the next Learn group and stay out of Review regardless of nextReviewAt. */
+  needsLearnReinforcement: boolean;
 }
