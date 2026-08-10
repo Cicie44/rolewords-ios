@@ -14,7 +14,6 @@ import {
   View,
 } from 'react-native';
 
-import { sampleVocabulary } from '@/src/data/sampleVocabulary';
 import {
   fetchInterviewSessionDetail,
   generateInterviewAnswers,
@@ -27,6 +26,7 @@ import {
   generateSavedItemChineseText,
   saveSavedItem,
 } from '@/src/services/savedItemsService';
+import { findVocabularyChineseMeaningByTerm } from '@/src/services/vocabularyService';
 import type {
   InterviewQuestion,
   InterviewQuestionType,
@@ -78,26 +78,6 @@ const FRAGMENT_SAVE_BUTTON_LABELS: Record<FragmentSaveCategory, string> = {
   needs_chinese: '补充中文',
   saved: '已收藏',
 };
-
-// Built once at module load, not on every render or tap — a read-only
-// case-insensitive lookup from a vocabulary term to its Chinese meaning.
-// Keyed by the term's trimmed, en-US-lowercased form so "Stakeholder" and
-// "stakeholder" both hit the same entry, but "stakeholder." or "key
-// stakeholder" (different full strings) correctly miss.
-const localVocabularyChineseMeaningByTerm = new Map<string, string>(
-  sampleVocabulary
-    .map((item): [string, string] => [
-      item.term.trim().toLocaleLowerCase('en-US'),
-      item.chineseMeaning.trim(),
-    ])
-    .filter(([term, meaning]) => term.length > 0 && meaning.length > 0),
-);
-
-// Returns undefined (never an empty string) when there's no exact local
-// match, so callers can fall back to generateSavedItemChineseText.
-function findLocalChineseMeaning(trimmedContent: string): string | undefined {
-  return localVocabularyChineseMeaningByTerm.get(trimmedContent.toLocaleLowerCase('en-US'));
-}
 
 // v0.1 lightweight context extraction — not an NLP sentence tokenizer. Uses
 // '.', '?', '!', and newlines as lightweight sentence boundaries to find the
@@ -777,11 +757,31 @@ export default function InterviewSessionScreen() {
       } else {
         setFragmentSavePhase('generating_chinese');
 
-        const localMeaning = findLocalChineseMeaning(trimmedContent);
+        // Database lookup first: an exact normalized-term match in the
+        // vocabulary catalog skips the AI call entirely. A lookup failure
+        // must not be treated as "no match" — that would silently trigger
+        // an unnecessary (and possibly paid) AI call — so it stops here
+        // with its own error instead of falling through.
+        let databaseMeaning: string | null;
+        try {
+          databaseMeaning = await findVocabularyChineseMeaningByTerm(trimmedContent);
+        } catch {
+          if (fragmentSaveTokenRef.current === requestToken && isSameSelectionStillActive()) {
+            setFragmentError('词库查询失败，请检查网络后重试。');
+          }
+          return;
+        }
 
-        if (localMeaning) {
-          // A full local match — no Function call, no AI cost.
-          chineseText = localMeaning;
+        if (fragmentSaveTokenRef.current !== requestToken) {
+          // The displayed record changed while the database lookup was in
+          // flight — stop here rather than spend an AI call on a selection
+          // that's no longer the live one.
+          return;
+        }
+
+        if (databaseMeaning) {
+          // A confirmed database match — no Function call, no AI cost.
+          chineseText = databaseMeaning;
         } else {
           try {
             chineseText = await generateSavedItemChineseText({

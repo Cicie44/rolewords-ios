@@ -278,7 +278,10 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      find_vocabulary_chinese_meaning: {
+        Args: { p_term: string }
+        Returns: string | null
+      }
     }
     Enums: {
       [_ in never]: never

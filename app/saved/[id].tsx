@@ -3,16 +3,15 @@ import { SymbolView } from 'expo-symbols';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { sampleVocabulary } from '@/src/data/sampleVocabulary';
 import {
   playPronunciation,
   stopPronunciation,
   type PronunciationCallbacks,
 } from '@/src/services/pronunciationService';
 import { fetchSavedItem } from '@/src/services/savedItemsService';
+import { fetchVocabularyItemById } from '@/src/services/vocabularyService';
 import type { SavedItem, SavedItemSourceType, SavedItemType } from '@/src/types/savedItem';
-
-const vocabularyById = new Map(sampleVocabulary.map((item) => [item.id, item]));
+import type { VocabularyItem } from '@/src/types/vocabulary';
 
 type LoadState = 'loading' | 'loaded' | 'error' | 'not-found';
 
@@ -36,6 +35,14 @@ export default function SavedItemDetailScreen() {
   const [retryToken, setRetryToken] = useState(0);
   const lastAutoPlayedIdRef = useRef<string | null>(null);
 
+  // The matched database vocabulary item for a "learning"-sourced bookmark,
+  // if any. Its own fetch is independent of savedItem's load state — a
+  // failure here (or a genuine no-match) must never fail the whole page,
+  // it just falls back to rendering the saved item's own content, same as
+  // when sourceId simply doesn't match anything.
+  const [vocabularyItem, setVocabularyItem] = useState<VocabularyItem | null>(null);
+  const vocabularyRequestTokenRef = useRef(0);
+
   // Shared playback state for whichever single piece of text this detail
   // page is currently reading aloud (the matched word, or the raw saved
   // content). `isPlayingRef` is the synchronous source of truth used inside
@@ -45,6 +52,14 @@ export default function SavedItemDetailScreen() {
   const playbackTokenRef = useRef(0);
 
   useEffect(() => {
+    // Eagerly clears the previous item's data the moment a new load
+    // starts (new itemId, or a retry) — not just loadState — so a
+    // slow-to-resolve vocabulary lookup tied to the old savedItem can
+    // never linger and get shown against whatever loads next. Content
+    // only ever renders when loadState === 'loaded' regardless, but
+    // clearing here removes any dependence on that as the sole guard.
+    setSavedItem(null);
+
     if (!itemId) {
       setLoadState('not-found');
       return;
@@ -76,6 +91,46 @@ export default function SavedItemDetailScreen() {
       isCancelled = true;
     };
   }, [itemId, retryToken]);
+
+  // Looks up the database vocabulary item for a "learning"-sourced
+  // bookmark. Reruns every time savedItem changes — including the change
+  // to null the moment a new item starts loading (see the effect above).
+  // The request token is bumped unconditionally as the very first thing
+  // this effect does, before any early return, so every one of: a
+  // non-"learning" source, a missing sourceId, savedItem going back to
+  // null, or a genuine switch to a different item, invalidates whatever
+  // lookup was previously in flight — a late arrival can never overwrite
+  // what's now displayed. The cleanup function covers the remaining case,
+  // unmount (or Expo Router reusing this screen instance while a lookup is
+  // still in flight), by bumping the token one more time on the way out.
+  // Any failure (network error or a genuine no-match) just leaves
+  // vocabularyItem null, falling back to the saved item's own content
+  // instead of failing the whole page.
+  useEffect(() => {
+    const requestToken = (vocabularyRequestTokenRef.current += 1);
+    setVocabularyItem(null);
+
+    if (savedItem?.sourceType !== 'learning' || !savedItem.sourceId) {
+      return;
+    }
+
+    const sourceId = savedItem.sourceId;
+
+    fetchVocabularyItemById(sourceId)
+      .then((item) => {
+        if (vocabularyRequestTokenRef.current !== requestToken) {
+          return;
+        }
+        setVocabularyItem(item);
+      })
+      .catch(() => {
+        // Deliberately swallowed — see the comment above this effect.
+      });
+
+    return () => {
+      vocabularyRequestTokenRef.current += 1;
+    };
+  }, [savedItem]);
 
   // Starts playback under a fresh token. `isPlayingRef`/`isPlaying` flip to
   // true synchronously (before the async voice lookup even begins) so a
@@ -152,11 +207,6 @@ export default function SavedItemDetailScreen() {
       };
     }, [itemId]),
   );
-
-  const vocabularyItem =
-    savedItem?.sourceType === 'learning' && savedItem.sourceId
-      ? vocabularyById.get(savedItem.sourceId)
-      : undefined;
 
   // Auto-plays the matched word's pronunciation exactly once per detail. The
   // ref guard protects against React re-running this effect for the same

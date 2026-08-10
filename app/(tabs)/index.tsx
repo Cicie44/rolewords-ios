@@ -3,8 +3,6 @@ import { SymbolView } from 'expo-symbols';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { sampleVocabulary } from '@/src/data/sampleVocabulary';
-import { wordBooks } from '@/src/data/wordBooks';
 import {
   LEARN_TARGET_COMPLETED,
   MAX_PRESENTATIONS_PER_WORD,
@@ -36,11 +34,10 @@ import {
   fetchWordProgress,
   saveWordProgress,
 } from '@/src/services/wordProgressService';
+import { fetchVocabularyByWordBookId, fetchWordBooks } from '@/src/services/vocabularyService';
 import type { SavedItem, SavedItemType } from '@/src/types/savedItem';
-import type { Familiarity, UserWordProgress, VocabularyItem } from '@/src/types/vocabulary';
+import type { Familiarity, UserWordProgress, VocabularyItem, WordBook } from '@/src/types/vocabulary';
 import type { LearnSession, ReviewSession, ScreenMode } from '@/src/types/learningSession';
-
-const vocabularyById = new Map(sampleVocabulary.map((item) => [item.id, item]));
 
 const CHOICES: { familiarity: Familiarity; label: string }[] = [
   { familiarity: 'unknown', label: '不认识' },
@@ -210,7 +207,36 @@ function WordCard({
 export default function LearnScreen() {
   const { session: authSession } = useAuth();
 
-  const [selectedWordBookId, setSelectedWordBookId] = useState(wordBooks[0].id);
+  // Word books load first (there's no valid selectedWordBookId until they
+  // do); vocabulary for the selected book loads independently and refetches
+  // whenever the selection changes. All three loads — word books, progress,
+  // and the selected book's vocabulary — are tracked separately so each can
+  // fail, show its own retry, and succeed without the others.
+  const [wordBooksState, setWordBooksState] = useState<WordBook[]>([]);
+  const [wordBooksLoadState, setWordBooksLoadState] = useState<LoadState>('loading');
+  const [wordBooksRetryToken, setWordBooksRetryToken] = useState(0);
+
+  const [selectedWordBookId, setSelectedWordBookId] = useState<string | null>(null);
+
+  const [wordsInBook, setWordsInBook] = useState<VocabularyItem[]>([]);
+  const [vocabularyLoadState, setVocabularyLoadState] = useState<LoadState>('loading');
+  const [vocabularyRetryToken, setVocabularyRetryToken] = useState(0);
+  // Which word book id wordsInBook / vocabularyLoadState's current
+  // outcome actually belongs to. Effects fire asynchronously after a state
+  // change commits, so there is a real render frame where
+  // selectedWordBookId has already changed but the vocabulary-fetch effect
+  // hasn't run yet — without these, that frame would render the *previous*
+  // book's title/counts/buttons alongside wordsInBook still holding the
+  // previous book's items. Every place that reads wordsInBook for
+  // rendering must go through vocabularyLoadedForSelectedBook (folded into
+  // dataReady) instead of trusting vocabularyLoadState alone.
+  const [loadedVocabularyWordBookId, setLoadedVocabularyWordBookId] = useState<string | null>(null);
+  const [vocabularyErrorWordBookId, setVocabularyErrorWordBookId] = useState<string | null>(null);
+  // Guards against a slow, now-superseded fetch for a previously selected
+  // word book overwriting the vocabulary of the word book the user has
+  // since switched to.
+  const vocabularyRequestTokenRef = useRef(0);
+
   const [progressByItemId, setProgressByItemId] = useState<Record<string, UserWordProgress>>({});
   const [loadState, setLoadState] = useState<LoadState>('loading');
   const [retryToken, setRetryToken] = useState(0);
@@ -248,12 +274,43 @@ export default function LearnScreen() {
   const sessionTokenRef = useRef(0);
   const lastAutoPlayedKeyRef = useRef<string | null>(null);
 
-  const selectedWordBook = wordBooks.find((book) => book.id === selectedWordBookId)!;
+  const selectedWordBook = wordBooksState.find((book) => book.id === selectedWordBookId);
 
-  const wordsInBook = useMemo(
-    () => sampleVocabulary.filter((item) => item.wordBookId === selectedWordBookId),
-    [selectedWordBookId],
-  );
+  // Only ever covers the currently selected book's vocabulary — Learn and
+  // Review sessions never reference a word from any other book, so this
+  // never needs to be a global, all-books lookup.
+  const vocabularyById = useMemo(() => new Map(wordsInBook.map((item) => [item.id, item])), [wordsInBook]);
+
+  // "Loaded" and "errored" are only trusted when they're tagged to the
+  // currently selected book — see the comment on loadedVocabularyWordBookId
+  // above. A stale 'loaded'/'error' left over from the previously selected
+  // book (during the render frame before the fetch effect below has run)
+  // counts as neither.
+  const vocabularyLoadedForSelectedBook =
+    vocabularyLoadState === 'loaded' &&
+    selectedWordBookId !== null &&
+    loadedVocabularyWordBookId === selectedWordBookId;
+  const vocabularyErrorForSelectedBook =
+    vocabularyLoadState === 'error' &&
+    selectedWordBookId !== null &&
+    vocabularyErrorWordBookId === selectedWordBookId;
+  const vocabularyPendingForSelectedBook =
+    wordBooksLoadState === 'loaded' &&
+    wordBooksState.length > 0 &&
+    loadState === 'loaded' &&
+    selectedWordBookId !== null &&
+    !vocabularyLoadedForSelectedBook &&
+    !vocabularyErrorForSelectedBook;
+
+  // Every dataset needed to actually study must be in before the panel or
+  // an active session can render — a book list without its vocabulary (or
+  // vice versa) would show wrong or empty counts instead of a real error.
+  const dataReady =
+    wordBooksLoadState === 'loaded' &&
+    wordBooksState.length > 0 &&
+    loadState === 'loaded' &&
+    vocabularyLoadedForSelectedBook &&
+    selectedWordBook !== undefined;
 
   const masteredCount = wordsInBook.filter(
     (item) => progressByItemId[item.id]?.status === 'mastered',
@@ -364,6 +421,70 @@ export default function LearnScreen() {
     currentWordIdRef.current = currentWord?.id;
     setBookmarkError(null);
   }, [currentWord?.id]);
+
+  // Loads the word book catalog once a session is available. A different
+  // signed-in user must never inherit a stale selection from the previous
+  // one, so selectedWordBookId resets to null here — the success handler
+  // below then defaults it to the first book, same as the previous
+  // hardcoded `wordBooks[0].id` did, just resolved after the fetch instead
+  // of at import time.
+  useEffect(() => {
+    const userId = authSession?.user.id;
+    if (!userId) {
+      return;
+    }
+
+    let isCancelled = false;
+    setWordBooksLoadState('loading');
+    setSelectedWordBookId(null);
+
+    fetchWordBooks()
+      .then((books) => {
+        if (isCancelled) return;
+        setWordBooksState(books);
+        setWordBooksLoadState('loaded');
+        setSelectedWordBookId(books[0]?.id ?? null);
+      })
+      .catch(() => {
+        if (isCancelled) return;
+        setWordBooksLoadState('error');
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [authSession?.user.id, wordBooksRetryToken]);
+
+  // Loads the selected word book's vocabulary. Reruns whenever the
+  // selection changes (or on retry) — the request token guards against a
+  // slow fetch for a book the user has since switched away from
+  // overwriting the vocabulary of the book now selected.
+  useEffect(() => {
+    if (!selectedWordBookId) {
+      setWordsInBook([]);
+      setLoadedVocabularyWordBookId(null);
+      setVocabularyErrorWordBookId(null);
+      return;
+    }
+
+    const requestToken = (vocabularyRequestTokenRef.current += 1);
+    const requestedWordBookId = selectedWordBookId;
+    setVocabularyLoadState('loading');
+
+    fetchVocabularyByWordBookId(requestedWordBookId)
+      .then((items) => {
+        if (vocabularyRequestTokenRef.current !== requestToken) return;
+        setWordsInBook(items);
+        setLoadedVocabularyWordBookId(requestedWordBookId);
+        setVocabularyErrorWordBookId(null);
+        setVocabularyLoadState('loaded');
+      })
+      .catch(() => {
+        if (vocabularyRequestTokenRef.current !== requestToken) return;
+        setVocabularyErrorWordBookId(requestedWordBookId);
+        setVocabularyLoadState('error');
+      });
+  }, [selectedWordBookId, vocabularyRetryToken]);
 
   // Loads remote progress once a session is available. Also resets every
   // piece of active-session state back to the control panel: a different
@@ -669,7 +790,7 @@ export default function LearnScreen() {
   };
 
   const handleStartLearn = () => {
-    if (isSaving || (newWordIds.length === 0 && carryoverWordIds.length === 0)) return;
+    if (!selectedWordBookId || isSaving || (newWordIds.length === 0 && carryoverWordIds.length === 0)) return;
     sessionTokenRef.current += 1;
     handledAnswerKeyRef.current = null;
     lastAutoPlayedKeyRef.current = null;
@@ -680,7 +801,7 @@ export default function LearnScreen() {
   };
 
   const handleStartReview = () => {
-    if (isSaving || dueWordIds.length === 0) return;
+    if (!selectedWordBookId || isSaving || dueWordIds.length === 0) return;
     sessionTokenRef.current += 1;
     handledAnswerKeyRef.current = null;
     lastAutoPlayedKeyRef.current = null;
@@ -754,13 +875,45 @@ export default function LearnScreen() {
     <ScrollView contentContainerStyle={styles.container}>
       <Text style={styles.title}>学习 Learn</Text>
 
-      {loadState === 'loading' && (
+      {wordBooksLoadState === 'loading' && (
+        <View style={styles.card}>
+          <Text style={styles.statusText}>正在加载词书列表…</Text>
+        </View>
+      )}
+
+      {wordBooksLoadState === 'error' && (
+        <View style={styles.card}>
+          <Text style={styles.errorText}>词书列表加载失败，请检查网络。</Text>
+          <Pressable
+            onPress={() => setWordBooksRetryToken((n) => n + 1)}
+            accessibilityRole="button"
+            accessibilityLabel="重试加载词书列表"
+            style={styles.retryButton}>
+            <Text style={styles.retryButtonText}>重试</Text>
+          </Pressable>
+        </View>
+      )}
+
+      {wordBooksLoadState === 'loaded' && wordBooksState.length === 0 && (
+        <View style={styles.card}>
+          <Text style={styles.errorText}>词书列表为空，暂时没有可学习的词书。</Text>
+          <Pressable
+            onPress={() => setWordBooksRetryToken((n) => n + 1)}
+            accessibilityRole="button"
+            accessibilityLabel="重试加载词书列表"
+            style={styles.retryButton}>
+            <Text style={styles.retryButtonText}>重试</Text>
+          </Pressable>
+        </View>
+      )}
+
+      {wordBooksLoadState === 'loaded' && wordBooksState.length > 0 && loadState === 'loading' && (
         <View style={styles.card}>
           <Text style={styles.statusText}>正在加载学习进度…</Text>
         </View>
       )}
 
-      {loadState === 'error' && (
+      {wordBooksLoadState === 'loaded' && wordBooksState.length > 0 && loadState === 'error' && (
         <View style={styles.card}>
           <Text style={styles.errorText}>学习进度加载失败，请检查网络。</Text>
           <Pressable
@@ -773,10 +926,32 @@ export default function LearnScreen() {
         </View>
       )}
 
-      {loadState === 'loaded' && screenMode === 'panel' && (
+      {vocabularyPendingForSelectedBook && (
+        <View style={styles.card}>
+          <Text style={styles.statusText}>正在加载词条…</Text>
+        </View>
+      )}
+
+      {wordBooksLoadState === 'loaded' &&
+        wordBooksState.length > 0 &&
+        loadState === 'loaded' &&
+        vocabularyErrorForSelectedBook && (
+          <View style={styles.card}>
+            <Text style={styles.errorText}>词条加载失败，请检查网络。</Text>
+            <Pressable
+              onPress={() => setVocabularyRetryToken((n) => n + 1)}
+              accessibilityRole="button"
+              accessibilityLabel="重试加载词条"
+              style={styles.retryButton}>
+              <Text style={styles.retryButtonText}>重试</Text>
+            </Pressable>
+          </View>
+        )}
+
+      {dataReady && screenMode === 'panel' && selectedWordBook && (
         <>
           <View style={styles.tabRow}>
-            {wordBooks.map((book) => {
+            {wordBooksState.map((book) => {
               const isSelected = book.id === selectedWordBookId;
               return (
                 <Pressable
@@ -809,8 +984,13 @@ export default function LearnScreen() {
             <Text style={styles.panelCardTitle}>Learn 新词与巩固</Text>
             <Text style={styles.panelCardLine}>待学新词：{newWordIds.length} 个</Text>
             <Text style={styles.panelCardLine}>待继续巩固：{carryoverWordIds.length} 个</Text>
-            {newWordIds.length === 0 && carryoverWordIds.length === 0 && (
-              <Text style={styles.panelCardEmpty}>本词书新词已全部学完，去 Review 复习吧。</Text>
+            {wordsInBook.length === 0 ? (
+              <Text style={styles.panelCardEmpty}>该词书暂无词条数据，请稍后重试。</Text>
+            ) : (
+              newWordIds.length === 0 &&
+              carryoverWordIds.length === 0 && (
+                <Text style={styles.panelCardEmpty}>本词书新词已全部学完，去 Review 复习吧。</Text>
+              )
             )}
             <Text style={styles.panelCardLine}>默认目标：掌握 {LEARN_TARGET_COMPLETED} 个词</Text>
             <Pressable
@@ -861,7 +1041,7 @@ export default function LearnScreen() {
         </>
       )}
 
-      {loadState === 'loaded' && learnPhase === 'active' && learnSession && currentWord && (
+      {dataReady && selectedWordBook && learnPhase === 'active' && learnSession && currentWord && (
         <>
           <Text style={styles.wordBookTitle}>
             {selectedWordBook.title} · {selectedWordBook.chineseTitle}
@@ -891,7 +1071,7 @@ export default function LearnScreen() {
         </>
       )}
 
-      {loadState === 'loaded' && learnPhase === 'summary' && learnSession && (
+      {dataReady && learnPhase === 'summary' && learnSession && (
         <View style={styles.card}>
           <Text style={styles.summaryTitle}>{learnSummaryTitle(learnSession.endReason)}</Text>
           {learnSession.endReason === 'book-exhausted' && (
@@ -958,7 +1138,7 @@ export default function LearnScreen() {
         </View>
       )}
 
-      {loadState === 'loaded' && reviewPhase === 'active' && reviewSession && currentWord && (
+      {dataReady && selectedWordBook && reviewPhase === 'active' && reviewSession && currentWord && (
         <>
           <Text style={styles.wordBookTitle}>
             {selectedWordBook.title} · {selectedWordBook.chineseTitle}
@@ -988,7 +1168,7 @@ export default function LearnScreen() {
         </>
       )}
 
-      {loadState === 'loaded' && reviewPhase === 'summary' && reviewSession && (
+      {dataReady && reviewPhase === 'summary' && reviewSession && (
         <View style={styles.card}>
           <Text style={styles.summaryTitle}>本组复习完成</Text>
           <Text style={styles.summaryLine}>已复习数量：{reviewSession.reviewedWordIds.length}</Text>
