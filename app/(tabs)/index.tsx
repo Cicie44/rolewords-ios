@@ -1,7 +1,7 @@
 import { useFocusEffect } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import {
   LEARN_TARGET_COMPLETED,
@@ -39,6 +39,25 @@ import type { SavedItem, SavedItemType } from '@/src/types/savedItem';
 import type { Familiarity, UserWordProgress, VocabularyItem, WordBook } from '@/src/types/vocabulary';
 import type { LearnSession, ReviewSession, ScreenMode } from '@/src/types/learningSession';
 
+// iOS-native, restrained palette: warm light-gray background, deep ink green
+// as the primary color, a softer green for accents, a muted warm tone for
+// "模糊", and system-gray neutrals. Scoped to this screen only.
+const COLORS = {
+  background: '#F6F3EE',
+  surface: '#FFFFFF',
+  ink: '#1E362F',
+  inkSoft: '#4B6358',
+  accent: '#5C8B76',
+  accentSoft: '#E4EEE8',
+  warm: '#B9814F',
+  warmDark: '#8C5C2E',
+  warmSoft: '#F5E9DA',
+  gray: '#8A8A8E',
+  grayTrack: '#EDEAE4',
+  border: '#E2DED7',
+  danger: '#B3483F',
+};
+
 const CHOICES: { familiarity: Familiarity; label: string }[] = [
   { familiarity: 'unknown', label: '不认识' },
   { familiarity: 'fuzzy', label: '模糊' },
@@ -59,6 +78,27 @@ function learnSummaryTitle(endReason: LearnSession['endReason']): string {
   return endReason === 'completed-target' || endReason === 'book-exhausted' ? '本组完成' : '本组已暂停';
 }
 
+// A thin, purely decorative progress bar — the adjacent text already states
+// the numbers, so this is hidden from screen readers rather than announced
+// as an empty, unlabeled element.
+function ProgressBar({ ratio, tone = 'accent' }: { ratio: number; tone?: 'accent' | 'warm' }) {
+  const clamped = Math.max(0, Math.min(1, Number.isFinite(ratio) ? ratio : 0));
+  return (
+    <View
+      style={styles.progressTrack}
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants">
+      <View
+        style={[
+          styles.progressFill,
+          tone === 'warm' ? styles.progressFillWarm : styles.progressFillAccent,
+          { width: `${clamped * 100}%` },
+        ]}
+      />
+    </View>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Shared word card: used by both the Learn-active and Review-active screens
 // so pronunciation, bookmarking, and the choice buttons only exist once.
@@ -66,7 +106,12 @@ function learnSummaryTitle(endReason: LearnSession['endReason']): string {
 
 type WordCardProps = {
   word: VocabularyItem;
-  headerLabel: string;
+  progressCurrent: number;
+  progressTotal: number;
+  progressLabel: string;
+  secondaryInfo?: string;
+  onExit: () => void;
+  exitDisabled: boolean;
   recognitionCount: number;
   isSaved: boolean;
   isBookmarkBusy: boolean;
@@ -81,7 +126,12 @@ type WordCardProps = {
 
 function WordCard({
   word,
-  headerLabel,
+  progressCurrent,
+  progressTotal,
+  progressLabel,
+  secondaryInfo,
+  onExit,
+  exitDisabled,
   recognitionCount,
   isSaved,
   isBookmarkBusy,
@@ -93,11 +143,55 @@ function WordCard({
   saveError,
   onChoice,
 }: WordCardProps) {
+  const progressRatio = progressTotal > 0 ? progressCurrent / progressTotal : 0;
+
   return (
     <View style={styles.card}>
-      <Text style={styles.sessionHeaderText}>{headerLabel}</Text>
+      <View style={styles.cardTopRow}>
+        <View style={styles.cardProgressGroup}>
+          <Text style={styles.cardProgressText}>
+            {progressLabel} {progressCurrent} / {progressTotal}
+            {secondaryInfo ? ` · ${secondaryInfo}` : ''}
+          </Text>
+          <ProgressBar ratio={progressRatio} />
+        </View>
+        <Pressable
+          onPress={onExit}
+          disabled={exitDisabled}
+          accessibilityRole="button"
+          accessibilityLabel="退出本组，返回学习首页"
+          hitSlop={8}
+          style={[styles.exitButton, exitDisabled && styles.disabledOpacity]}>
+          <SymbolView name={{ ios: 'xmark', android: 'close', web: 'close' }} tintColor={COLORS.gray} size={16} />
+        </Pressable>
+      </View>
 
-      <Text style={styles.word}>{word.term}</Text>
+      <View style={styles.cardHeaderRow}>
+        <Text style={styles.word} numberOfLines={2}>
+          {word.term}
+        </Text>
+        <Pressable
+          onPress={onToggleBookmark}
+          disabled={isBookmarkBusy || savedLoadState !== 'loaded'}
+          accessibilityRole="button"
+          accessibilityLabel={isSaved ? `取消收藏 ${word.term}` : `收藏 ${word.term}`}
+          hitSlop={8}
+          style={styles.bookmarkButton}>
+          {isBookmarkBusy ? (
+            <ActivityIndicator size="small" color={COLORS.ink} />
+          ) : (
+            <SymbolView
+              name={{
+                ios: isSaved ? 'bookmark.fill' : 'bookmark',
+                android: isSaved ? 'bookmark' : 'bookmark_border',
+                web: isSaved ? 'bookmark' : 'bookmark_border',
+              }}
+              tintColor={COLORS.ink}
+              size={20}
+            />
+          )}
+        </Pressable>
+      </View>
 
       <View style={styles.pronunciationRow}>
         {word.ipa && (
@@ -115,26 +209,8 @@ function WordCard({
           style={styles.speakerButton}>
           <SymbolView
             name={{ ios: 'speaker.wave.2.fill', android: 'volume_up', web: 'volume_up' }}
-            tintColor="#2f95dc"
-            size={20}
-          />
-        </Pressable>
-
-        <Pressable
-          onPress={onToggleBookmark}
-          disabled={isBookmarkBusy || savedLoadState !== 'loaded'}
-          accessibilityRole="button"
-          accessibilityLabel={isSaved ? `取消收藏 ${word.term}` : `收藏 ${word.term}`}
-          hitSlop={8}
-          style={styles.bookmarkButton}>
-          <SymbolView
-            name={{
-              ios: isSaved ? 'bookmark.fill' : 'bookmark',
-              android: isSaved ? 'bookmark' : 'bookmark_border',
-              web: isSaved ? 'bookmark' : 'bookmark_border',
-            }}
-            tintColor="#2f95dc"
-            size={20}
+            tintColor={COLORS.accent}
+            size={18}
           />
         </Pressable>
       </View>
@@ -153,31 +229,43 @@ function WordCard({
       )}
       {bookmarkError && <Text style={styles.errorText}>{bookmarkError}</Text>}
 
-      <Text style={styles.recognitionProgress}>
-        认识进度 {recognitionCount} / {MAX_RECOGNITION_COUNT}
-      </Text>
+      <View style={styles.divider} />
 
-      <Text style={styles.meaning}>中文：{word.chineseMeaning}</Text>
+      <View style={styles.recognitionRow}>
+        <Text style={styles.recognitionLabel}>认识进度</Text>
+        <View
+          style={styles.dotsRow}
+          accessibilityLabel={`认识进度 ${recognitionCount} / ${MAX_RECOGNITION_COUNT}`}>
+          {Array.from({ length: MAX_RECOGNITION_COUNT }).map((_, index) => (
+            <View key={index} style={[styles.dot, index < recognitionCount && styles.dotFilled]} />
+          ))}
+        </View>
+      </View>
+
+      <View style={styles.fieldBlock}>
+        <Text style={styles.fieldLabel}>中文释义</Text>
+        <Text style={styles.meaning}>{word.chineseMeaning}</Text>
+      </View>
 
       {word.englishDefinition && (
-        <>
-          <Text style={styles.sectionLabel}>Definition</Text>
+        <View style={styles.fieldBlock}>
+          <Text style={styles.fieldLabel}>Definition</Text>
           <Text style={styles.example}>{word.englishDefinition}</Text>
-        </>
+        </View>
       )}
 
       {word.exampleSentence && (
-        <>
-          <Text style={styles.sectionLabel}>Example</Text>
+        <View style={styles.fieldBlock}>
+          <Text style={styles.fieldLabel}>Example</Text>
           <Text style={styles.example}>{word.exampleSentence}</Text>
-        </>
+        </View>
       )}
 
       {word.exampleTranslation && (
-        <>
-          <Text style={styles.sectionLabel}>翻译</Text>
+        <View style={styles.fieldBlock}>
+          <Text style={styles.fieldLabel}>翻译</Text>
           <Text style={styles.translation}>{word.exampleTranslation}</Text>
-        </>
+        </View>
       )}
 
       {saveError && <Text style={styles.errorText}>{saveError}</Text>}
@@ -191,8 +279,22 @@ function WordCard({
             disabled={isSaving}
             accessibilityRole="button"
             accessibilityLabel={`标记 ${word.term} 为${label}`}
-            style={[styles.choiceButton, isSaving && styles.disabledOpacity]}>
-            <Text style={styles.choiceButtonText}>{label}</Text>
+            style={[
+              styles.choiceButton,
+              familiarity === 'unknown' && styles.choiceButtonNeutral,
+              familiarity === 'fuzzy' && styles.choiceButtonWarm,
+              familiarity === 'known' && styles.choiceButtonPrimary,
+              isSaving && styles.disabledOpacity,
+            ]}>
+            <Text
+              style={[
+                styles.choiceButtonText,
+                familiarity === 'unknown' && styles.choiceButtonTextNeutral,
+                familiarity === 'fuzzy' && styles.choiceButtonTextWarm,
+                familiarity === 'known' && styles.choiceButtonTextPrimary,
+              ]}>
+              {label}
+            </Text>
           </Pressable>
         ))}
       </View>
@@ -315,6 +417,12 @@ export default function LearnScreen() {
   const masteredCount = wordsInBook.filter(
     (item) => progressByItemId[item.id]?.status === 'mastered',
   ).length;
+
+  // Display-only derived value (a rounded percentage of masteredCount /
+  // wordsInBook.length) — no new business meaning, purely how the existing
+  // ratio is presented on the progress bar/label.
+  const masteredPercent =
+    wordsInBook.length > 0 ? Math.round((masteredCount / wordsInBook.length) * 100) : 0;
 
   // New-word definition: no progress row at all (our own writes never save
   // status 'new', so this is effectively "never studied").
@@ -871,18 +979,29 @@ export default function LearnScreen() {
     ]);
   };
 
+  const learnSummaryIsPaused =
+    learnSession !== null &&
+    learnSession.endReason !== 'completed-target' &&
+    learnSession.endReason !== 'book-exhausted';
+
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      <Text style={styles.title}>学习 Learn</Text>
+      <View style={styles.header}>
+        <Text style={styles.brand}>RoleWords</Text>
+        <Text style={styles.heroTitle}>今天继续学一点</Text>
+        <Text style={styles.heroSubtitle}>
+          每组新词最多 {LEARN_TARGET_COMPLETED} 个，认识满 {MAX_RECOGNITION_COUNT} 次即掌握；巩固词与到期复习词会公平穿插出现。
+        </Text>
+      </View>
 
       {wordBooksLoadState === 'loading' && (
-        <View style={styles.card}>
+        <View style={styles.stateCard}>
           <Text style={styles.statusText}>正在加载词书列表…</Text>
         </View>
       )}
 
       {wordBooksLoadState === 'error' && (
-        <View style={styles.card}>
+        <View style={styles.stateCard}>
           <Text style={styles.errorText}>词书列表加载失败，请检查网络。</Text>
           <Pressable
             onPress={() => setWordBooksRetryToken((n) => n + 1)}
@@ -895,7 +1014,7 @@ export default function LearnScreen() {
       )}
 
       {wordBooksLoadState === 'loaded' && wordBooksState.length === 0 && (
-        <View style={styles.card}>
+        <View style={styles.stateCard}>
           <Text style={styles.errorText}>词书列表为空，暂时没有可学习的词书。</Text>
           <Pressable
             onPress={() => setWordBooksRetryToken((n) => n + 1)}
@@ -908,13 +1027,13 @@ export default function LearnScreen() {
       )}
 
       {wordBooksLoadState === 'loaded' && wordBooksState.length > 0 && loadState === 'loading' && (
-        <View style={styles.card}>
+        <View style={styles.stateCard}>
           <Text style={styles.statusText}>正在加载学习进度…</Text>
         </View>
       )}
 
       {wordBooksLoadState === 'loaded' && wordBooksState.length > 0 && loadState === 'error' && (
-        <View style={styles.card}>
+        <View style={styles.stateCard}>
           <Text style={styles.errorText}>学习进度加载失败，请检查网络。</Text>
           <Pressable
             onPress={() => setRetryToken((n) => n + 1)}
@@ -927,7 +1046,7 @@ export default function LearnScreen() {
       )}
 
       {vocabularyPendingForSelectedBook && (
-        <View style={styles.card}>
+        <View style={styles.stateCard}>
           <Text style={styles.statusText}>正在加载词条…</Text>
         </View>
       )}
@@ -936,7 +1055,7 @@ export default function LearnScreen() {
         wordBooksState.length > 0 &&
         loadState === 'loaded' &&
         vocabularyErrorForSelectedBook && (
-          <View style={styles.card}>
+          <View style={styles.stateCard}>
             <Text style={styles.errorText}>词条加载失败，请检查网络。</Text>
             <Pressable
               onPress={() => setVocabularyRetryToken((n) => n + 1)}
@@ -950,7 +1069,7 @@ export default function LearnScreen() {
 
       {dataReady && screenMode === 'panel' && selectedWordBook && (
         <>
-          <View style={styles.tabRow}>
+          <View style={styles.segmentedTrack}>
             {wordBooksState.map((book) => {
               const isSelected = book.id === selectedWordBookId;
               return (
@@ -958,12 +1077,17 @@ export default function LearnScreen() {
                   key={book.id}
                   onPress={() => handleSelectWordBook(book.id)}
                   disabled={isRestarting}
+                  accessibilityRole="button"
+                  accessibilityLabel={`切换到${book.chineseTitle}词书`}
+                  accessibilityState={{ selected: isSelected, disabled: isRestarting }}
                   style={[
-                    styles.tabButton,
-                    isSelected && styles.tabButtonSelected,
+                    styles.segmentButton,
+                    isSelected && styles.segmentButtonSelected,
                     isRestarting && styles.disabledOpacity,
                   ]}>
-                  <Text style={[styles.tabButtonText, isSelected && styles.tabButtonTextSelected]}>
+                  <Text
+                    style={[styles.segmentButtonText, isSelected && styles.segmentButtonTextSelected]}
+                    numberOfLines={1}>
                     {book.chineseTitle}
                   </Text>
                 </Pressable>
@@ -971,58 +1095,89 @@ export default function LearnScreen() {
             })}
           </View>
 
-          <View style={styles.wordBookInfo}>
-            <Text style={styles.wordBookTitle}>
+          <View style={styles.wordBookInfoCard}>
+            <Text style={styles.wordBookTitle} numberOfLines={1}>
               {selectedWordBook.title} · {selectedWordBook.chineseTitle}
             </Text>
-            <Text style={styles.wordBookCount}>
-              已掌握 {masteredCount} / {wordsInBook.length}
-            </Text>
-          </View>
-
-          <View style={styles.panelCard}>
-            <Text style={styles.panelCardTitle}>Learn 新词与巩固</Text>
-            <Text style={styles.panelCardLine}>待学新词：{newWordIds.length} 个</Text>
-            <Text style={styles.panelCardLine}>待继续巩固：{carryoverWordIds.length} 个</Text>
-            {wordsInBook.length === 0 ? (
-              <Text style={styles.panelCardEmpty}>该词书暂无词条数据，请稍后重试。</Text>
-            ) : (
-              newWordIds.length === 0 &&
-              carryoverWordIds.length === 0 && (
-                <Text style={styles.panelCardEmpty}>本词书新词已全部学完，去 Review 复习吧。</Text>
-              )
-            )}
-            <Text style={styles.panelCardLine}>默认目标：掌握 {LEARN_TARGET_COMPLETED} 个词</Text>
-            <Pressable
-              onPress={handleStartLearn}
-              disabled={newWordIds.length === 0 && carryoverWordIds.length === 0}
-              accessibilityRole="button"
-              accessibilityLabel="开始学习"
-              style={[
-                styles.primaryButton,
-                newWordIds.length === 0 && carryoverWordIds.length === 0 && styles.disabledOpacity,
-              ]}>
-              <Text style={styles.primaryButtonText}>开始学习</Text>
-            </Pressable>
-          </View>
-
-          <View style={styles.panelCard}>
-            <Text style={styles.panelCardTitle}>Review 复习</Text>
-            {dueWordIds.length > 0 ? (
-              <Text style={styles.panelCardLine}>
-                当前到期：{dueWordIds.length} 个（每组最多 {REVIEW_GROUP_SIZE} 个）
+            <View style={styles.wordBookStatsRow}>
+              <Text style={styles.wordBookStatsText}>
+                已掌握 {masteredCount} / {wordsInBook.length}
               </Text>
-            ) : (
-              <Text style={styles.panelCardEmpty}>暂无到期复习词，继续学习新词吧。</Text>
-            )}
-            <Pressable
-              onPress={handleStartReview}
-              disabled={dueWordIds.length === 0}
-              accessibilityRole="button"
-              accessibilityLabel="开始复习"
-              style={[styles.secondaryButton, dueWordIds.length === 0 && styles.disabledOpacity]}>
-              <Text style={styles.secondaryButtonText}>开始复习</Text>
-            </Pressable>
+              <Text style={styles.wordBookStatsPercent}>{masteredPercent}%</Text>
+            </View>
+            <ProgressBar ratio={wordsInBook.length > 0 ? masteredCount / wordsInBook.length : 0} />
+          </View>
+
+          <View style={styles.sessionCard}>
+            <Text style={styles.sessionCardTitle}>本次学习</Text>
+
+            <View style={styles.sessionBlock}>
+              <View style={styles.sessionBlockHeaderRow}>
+                <Text style={styles.sessionBlockTitle}>Learn 新词与巩固</Text>
+                <Text style={styles.sessionBlockTarget}>目标 {LEARN_TARGET_COMPLETED} 个</Text>
+              </View>
+
+              <View style={styles.statChipsRow}>
+                <View style={styles.statChip}>
+                  <Text style={styles.statChipValue}>{newWordIds.length}</Text>
+                  <Text style={styles.statChipLabel}>待学新词</Text>
+                </View>
+                <View style={styles.statChip}>
+                  <Text style={styles.statChipValue}>{carryoverWordIds.length}</Text>
+                  <Text style={styles.statChipLabel}>待继续巩固</Text>
+                </View>
+              </View>
+
+              {wordsInBook.length === 0 ? (
+                <Text style={styles.sessionBlockEmpty}>该词书暂无词条数据，请稍后重试。</Text>
+              ) : (
+                newWordIds.length === 0 &&
+                carryoverWordIds.length === 0 && (
+                  <Text style={styles.sessionBlockEmpty}>本词书新词已全部学完，去 Review 复习吧。</Text>
+                )
+              )}
+
+              <Pressable
+                onPress={handleStartLearn}
+                disabled={newWordIds.length === 0 && carryoverWordIds.length === 0}
+                accessibilityRole="button"
+                accessibilityLabel="开始学习"
+                style={[
+                  styles.primaryButton,
+                  newWordIds.length === 0 && carryoverWordIds.length === 0 && styles.disabledOpacity,
+                ]}>
+                <Text style={styles.primaryButtonText}>开始学习</Text>
+              </Pressable>
+            </View>
+
+            <View style={styles.sessionDivider} />
+
+            <View style={styles.sessionBlock}>
+              <View style={styles.sessionBlockHeaderRow}>
+                <Text style={styles.sessionBlockTitle}>Review 复习</Text>
+                <Text style={styles.sessionBlockTarget}>每组上限 {REVIEW_GROUP_SIZE}</Text>
+              </View>
+
+              {dueWordIds.length > 0 ? (
+                <View style={styles.statChipsRow}>
+                  <View style={styles.statChip}>
+                    <Text style={styles.statChipValue}>{dueWordIds.length}</Text>
+                    <Text style={styles.statChipLabel}>到期待复习</Text>
+                  </View>
+                </View>
+              ) : (
+                <Text style={styles.sessionBlockEmpty}>暂无到期复习词，继续学习新词吧。</Text>
+              )}
+
+              <Pressable
+                onPress={handleStartReview}
+                disabled={dueWordIds.length === 0}
+                accessibilityRole="button"
+                accessibilityLabel="开始复习"
+                style={[styles.secondaryButton, dueWordIds.length === 0 && styles.disabledOpacity]}>
+                <Text style={styles.secondaryButtonText}>开始复习</Text>
+              </Pressable>
+            </View>
           </View>
 
           <View style={styles.restartSection}>
@@ -1043,12 +1198,17 @@ export default function LearnScreen() {
 
       {dataReady && selectedWordBook && learnPhase === 'active' && learnSession && currentWord && (
         <>
-          <Text style={styles.wordBookTitle}>
+          <Text style={styles.wordBookKicker} numberOfLines={1}>
             {selectedWordBook.title} · {selectedWordBook.chineseTitle}
           </Text>
           <WordCard
             word={currentWord}
-            headerLabel={`完成 ${learnSession.completedWordIds.length} / ${LEARN_TARGET_COMPLETED} · 本组已见 ${learnSession.seenWordIds.length} 个词`}
+            progressCurrent={learnSession.completedWordIds.length}
+            progressTotal={LEARN_TARGET_COMPLETED}
+            progressLabel="完成"
+            secondaryInfo={`本组已见 ${learnSession.seenWordIds.length} 个词`}
+            onExit={handleReturnToPanel}
+            exitDisabled={isSaving}
             recognitionCount={progressByItemId[currentWord.id]?.recognitionCount ?? 0}
             isSaved={isCurrentWordSaved}
             isBookmarkBusy={isBookmarkBusy}
@@ -1060,70 +1220,109 @@ export default function LearnScreen() {
             saveError={saveError}
             onChoice={handleLearnChoice}
           />
-          <Pressable
-            onPress={handleReturnToPanel}
-            disabled={isSaving}
-            accessibilityRole="button"
-            accessibilityLabel="退出本组，返回学习控制面板"
-            style={[styles.exitLinkButton, isSaving && styles.disabledOpacity]}>
-            <Text style={styles.exitLinkButtonText}>退出本组，返回控制面板</Text>
-          </Pressable>
         </>
       )}
 
       {dataReady && learnPhase === 'summary' && learnSession && (
-        <View style={styles.card}>
-          <Text style={styles.summaryTitle}>{learnSummaryTitle(learnSession.endReason)}</Text>
+        <View style={styles.summaryCard}>
+          <View style={[styles.summaryBadge, learnSummaryIsPaused && styles.summaryBadgePaused]}>
+            <Text style={[styles.summaryBadgeText, learnSummaryIsPaused && styles.summaryBadgeTextPaused]}>
+              {learnSummaryTitle(learnSession.endReason)}
+            </Text>
+          </View>
+
+          <Text style={styles.summaryHero}>完成一组，休息一下</Text>
           {learnSession.endReason === 'book-exhausted' && (
-            <Text style={styles.summaryLine}>本词书新词已全部学完。</Text>
+            <Text style={styles.summaryNote}>本词书新词已全部学完。</Text>
           )}
-          <Text style={styles.summaryLine}>
-            完成目标：{learnSession.completedWordIds.length} / {LEARN_TARGET_COMPLETED}
-          </Text>
-          <Text style={styles.summaryLine}>本组见过的词数量：{learnSession.seenWordIds.length}</Text>
-          <Text style={styles.summaryLine}>卡片总展示次数：{learnSession.totalPresentationCount}</Text>
-          <Text style={styles.summaryLine}>不认识选择次数：{learnSession.unknownCount}</Text>
-          <Text style={styles.summaryLine}>模糊选择次数：{learnSession.fuzzyCount}</Text>
-          <Text style={styles.summaryLine}>认识选择次数：{learnSession.knownCount}</Text>
+
+          <View style={styles.summaryHeroStatRow}>
+            <Text style={styles.summaryHeroStatValue}>{learnSession.completedWordIds.length}</Text>
+            <Text style={styles.summaryHeroStatDivider}>/</Text>
+            <Text style={styles.summaryHeroStatTotal}>{LEARN_TARGET_COMPLETED}</Text>
+            <Text style={styles.summaryHeroStatLabel}>已完成目标</Text>
+          </View>
+          <ProgressBar
+            ratio={LEARN_TARGET_COMPLETED > 0 ? learnSession.completedWordIds.length / LEARN_TARGET_COMPLETED : 0}
+          />
+
+          <View style={styles.statGrid}>
+            <View style={styles.statGridItem}>
+              <Text style={styles.statGridValue}>{learnSession.seenWordIds.length}</Text>
+              <Text style={styles.statGridLabel}>见过词数</Text>
+            </View>
+            <View style={styles.statGridItem}>
+              <Text style={styles.statGridValue}>{learnSession.totalPresentationCount}</Text>
+              <Text style={styles.statGridLabel}>卡片展示次数</Text>
+            </View>
+            <View style={styles.statGridItem}>
+              <Text style={styles.statGridValue}>{learnSession.graduatedWordIds.length}</Text>
+              <Text style={styles.statGridLabel}>转入 Review</Text>
+            </View>
+            <View style={styles.statGridItem}>
+              <Text style={styles.statGridValue}>{learnSession.unknownCount}</Text>
+              <Text style={styles.statGridLabel}>不认识</Text>
+            </View>
+            <View style={styles.statGridItem}>
+              <Text style={styles.statGridValue}>{learnSession.fuzzyCount}</Text>
+              <Text style={styles.statGridLabel}>模糊</Text>
+            </View>
+            <View style={styles.statGridItem}>
+              <Text style={styles.statGridValue}>{learnSession.knownCount}</Text>
+              <Text style={styles.statGridLabel}>认识</Text>
+            </View>
+          </View>
 
           <Text style={styles.sectionLabel}>本组完成词</Text>
-          <Text style={styles.example}>
-            {learnSession.completedWordIds.length > 0
-              ? learnSession.completedWordIds
-                  .map((id) => vocabularyById.get(id)?.term ?? id)
-                  .join('、')
-              : '暂无'}
-          </Text>
+          <View style={styles.chipWrapRow}>
+            {learnSession.completedWordIds.length > 0 ? (
+              learnSession.completedWordIds.map((id) => (
+                <View key={id} style={styles.termChip}>
+                  <Text style={styles.termChipText}>{vocabularyById.get(id)?.term ?? id}</Text>
+                </View>
+              ))
+            ) : (
+              <Text style={styles.summaryNote}>暂无</Text>
+            )}
+          </View>
 
           <Text style={styles.sectionLabel}>下组继续巩固</Text>
-          <Text style={styles.example}>
-            {learnSession.carryoverWordIds.length > 0
-              ? learnSession.carryoverWordIds
-                  .map((id) => vocabularyById.get(id)?.term ?? id)
-                  .join('、')
-              : '暂无'}
-          </Text>
+          <View style={styles.chipWrapRow}>
+            {learnSession.carryoverWordIds.length > 0 ? (
+              learnSession.carryoverWordIds.map((id) => (
+                <View key={id} style={styles.termChip}>
+                  <Text style={styles.termChipText}>{vocabularyById.get(id)?.term ?? id}</Text>
+                </View>
+              ))
+            ) : (
+              <Text style={styles.summaryNote}>暂无</Text>
+            )}
+          </View>
 
           <Text style={styles.sectionLabel}>转入 Review 的困难词</Text>
-          <Text style={styles.example}>
-            {learnSession.graduatedWordIds.length > 0
-              ? learnSession.graduatedWordIds
-                  .map((id) => vocabularyById.get(id)?.term ?? id)
-                  .join('、')
-              : '暂无'}
-          </Text>
+          <View style={styles.chipWrapRow}>
+            {learnSession.graduatedWordIds.length > 0 ? (
+              learnSession.graduatedWordIds.map((id) => (
+                <View key={id} style={styles.termChipWarm}>
+                  <Text style={styles.termChipWarmText}>{vocabularyById.get(id)?.term ?? id}</Text>
+                </View>
+              ))
+            ) : (
+              <Text style={styles.summaryNote}>暂无</Text>
+            )}
+          </View>
 
-          <Text style={styles.summaryLine}>当前词书剩余新词数量：{newWordIds.length}</Text>
-          <Text style={styles.summaryLine}>当前待继续巩固数量：{carryoverWordIds.length}</Text>
-
-          <Text style={styles.hintText}>已经完成一组学习，休息一下再继续吧。</Text>
+          <View style={styles.summaryStatsFooterRow}>
+            <Text style={styles.summaryFooterText}>当前词书剩余新词数量：{newWordIds.length}</Text>
+            <Text style={styles.summaryFooterText}>当前待继续巩固数量：{carryoverWordIds.length}</Text>
+          </View>
 
           <Pressable
             onPress={handleReturnToPanel}
             accessibilityRole="button"
-            accessibilityLabel="完成本组，返回学习控制面板"
-            style={styles.restartButton}>
-            <Text style={styles.restartButtonText}>完成本组，返回控制面板</Text>
+            accessibilityLabel="完成本组，返回学习首页"
+            style={styles.primaryButton}>
+            <Text style={styles.primaryButtonText}>返回学习首页</Text>
           </Pressable>
 
           {(newWordIds.length > 0 || carryoverWordIds.length > 0) && (
@@ -1140,12 +1339,16 @@ export default function LearnScreen() {
 
       {dataReady && selectedWordBook && reviewPhase === 'active' && reviewSession && currentWord && (
         <>
-          <Text style={styles.wordBookTitle}>
+          <Text style={styles.wordBookKicker} numberOfLines={1}>
             {selectedWordBook.title} · {selectedWordBook.chineseTitle}
           </Text>
           <WordCard
             word={currentWord}
-            headerLabel={`复习进度 ${reviewSession.reviewedWordIds.length} / ${reviewSession.totalCount}`}
+            progressCurrent={reviewSession.reviewedWordIds.length}
+            progressTotal={reviewSession.totalCount}
+            progressLabel="复习进度"
+            onExit={handleReturnToPanel}
+            exitDisabled={isSaving}
             recognitionCount={progressByItemId[currentWord.id]?.recognitionCount ?? 0}
             isSaved={isCurrentWordSaved}
             isBookmarkBusy={isBookmarkBusy}
@@ -1157,32 +1360,52 @@ export default function LearnScreen() {
             saveError={saveError}
             onChoice={handleReviewChoice}
           />
-          <Pressable
-            onPress={handleReturnToPanel}
-            disabled={isSaving}
-            accessibilityRole="button"
-            accessibilityLabel="退出本组，返回学习控制面板"
-            style={[styles.exitLinkButton, isSaving && styles.disabledOpacity]}>
-            <Text style={styles.exitLinkButtonText}>退出本组，返回控制面板</Text>
-          </Pressable>
         </>
       )}
 
       {dataReady && reviewPhase === 'summary' && reviewSession && (
-        <View style={styles.card}>
-          <Text style={styles.summaryTitle}>本组复习完成</Text>
-          <Text style={styles.summaryLine}>已复习数量：{reviewSession.reviewedWordIds.length}</Text>
-          <Text style={styles.summaryLine}>不认识：{reviewSession.unknownCount}</Text>
-          <Text style={styles.summaryLine}>模糊：{reviewSession.fuzzyCount}</Text>
-          <Text style={styles.summaryLine}>认识：{reviewSession.knownCount}</Text>
-          <Text style={styles.summaryLine}>仍然到期的剩余数量：{dueWordIds.length}</Text>
+        <View style={styles.summaryCard}>
+          <View style={styles.summaryBadge}>
+            <Text style={styles.summaryBadgeText}>本组复习完成</Text>
+          </View>
+
+          <Text style={styles.summaryHero}>复习完成，继续保持</Text>
+
+          <View style={styles.summaryHeroStatRow}>
+            <Text style={styles.summaryHeroStatValue}>{reviewSession.reviewedWordIds.length}</Text>
+            <Text style={styles.summaryHeroStatDivider}>/</Text>
+            <Text style={styles.summaryHeroStatTotal}>{reviewSession.totalCount}</Text>
+            <Text style={styles.summaryHeroStatLabel}>已复习</Text>
+          </View>
+          <ProgressBar
+            ratio={reviewSession.totalCount > 0 ? reviewSession.reviewedWordIds.length / reviewSession.totalCount : 0}
+          />
+
+          <View style={styles.statGrid}>
+            <View style={styles.statGridItem}>
+              <Text style={styles.statGridValue}>{reviewSession.unknownCount}</Text>
+              <Text style={styles.statGridLabel}>不认识</Text>
+            </View>
+            <View style={styles.statGridItem}>
+              <Text style={styles.statGridValue}>{reviewSession.fuzzyCount}</Text>
+              <Text style={styles.statGridLabel}>模糊</Text>
+            </View>
+            <View style={styles.statGridItem}>
+              <Text style={styles.statGridValue}>{reviewSession.knownCount}</Text>
+              <Text style={styles.statGridLabel}>认识</Text>
+            </View>
+            <View style={styles.statGridItem}>
+              <Text style={styles.statGridValue}>{dueWordIds.length}</Text>
+              <Text style={styles.statGridLabel}>仍然到期</Text>
+            </View>
+          </View>
 
           <Pressable
             onPress={handleReturnToPanel}
             accessibilityRole="button"
-            accessibilityLabel="完成复习，返回学习控制面板"
-            style={styles.restartButton}>
-            <Text style={styles.restartButtonText}>完成复习</Text>
+            accessibilityLabel="完成复习，返回学习首页"
+            style={styles.primaryButton}>
+            <Text style={styles.primaryButtonText}>返回学习首页</Text>
           </Pressable>
 
           {dueWordIds.length > 0 && (
@@ -1203,84 +1426,237 @@ export default function LearnScreen() {
 const styles = StyleSheet.create({
   container: {
     flexGrow: 1,
+    backgroundColor: COLORS.background,
     alignItems: 'center',
     padding: 20,
-    paddingTop: 32,
+    paddingTop: 24,
+    gap: 16,
   },
-  title: {
-    fontSize: 22,
-    fontWeight: 'bold',
-    marginBottom: 20,
+  header: {
+    width: '100%',
+    gap: 4,
   },
-  tabRow: {
-    flexDirection: 'row',
-    gap: 8,
-    marginBottom: 16,
+  brand: {
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 1.5,
+    color: COLORS.accent,
+    textTransform: 'uppercase',
   },
-  tabButton: {
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderRadius: 20,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#ccc',
+  heroTitle: {
+    fontSize: 26,
+    fontWeight: '700',
+    color: COLORS.ink,
   },
-  tabButtonSelected: {
-    backgroundColor: '#2f95dc',
-    borderColor: '#2f95dc',
-  },
-  tabButtonText: {
-    fontSize: 14,
-    color: '#333',
-  },
-  tabButtonTextSelected: {
-    color: '#fff',
-    fontWeight: '600',
+  heroSubtitle: {
+    fontSize: 13,
+    lineHeight: 19,
+    color: COLORS.gray,
+    marginTop: 2,
   },
   disabledOpacity: {
     opacity: 0.5,
   },
-  wordBookInfo: {
+  stateCard: {
     width: '100%',
-    marginBottom: 16,
+    borderRadius: 16,
+    backgroundColor: COLORS.surface,
+    padding: 20,
+    gap: 8,
+  },
+  statusText: {
+    fontSize: 13,
+    color: COLORS.gray,
+  },
+  errorText: {
+    fontSize: 13,
+    color: COLORS.danger,
+  },
+  retryButton: {
+    marginTop: 4,
+    minHeight: 44,
+    borderRadius: 10,
+    backgroundColor: COLORS.ink,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+    alignSelf: 'flex-start',
+  },
+  retryButtonText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  segmentedTrack: {
+    width: '100%',
+    flexDirection: 'row',
+    backgroundColor: COLORS.grayTrack,
+    borderRadius: 12,
+    padding: 3,
+    gap: 3,
+  },
+  segmentButton: {
+    flex: 1,
+    minHeight: 38,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+  },
+  segmentButtonSelected: {
+    backgroundColor: COLORS.ink,
+  },
+  segmentButtonText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.inkSoft,
+  },
+  segmentButtonTextSelected: {
+    color: '#fff',
+  },
+  wordBookInfoCard: {
+    width: '100%',
+    borderRadius: 16,
+    backgroundColor: COLORS.surface,
+    padding: 18,
+    gap: 8,
   },
   wordBookTitle: {
     fontSize: 16,
+    fontWeight: '700',
+    color: COLORS.ink,
+  },
+  wordBookKicker: {
+    fontSize: 13,
     fontWeight: '600',
-    marginBottom: 12,
+    color: COLORS.gray,
     width: '100%',
   },
-  wordBookCount: {
-    fontSize: 13,
-    color: '#888',
-    marginTop: 2,
+  wordBookStatsRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
   },
-  panelCard: {
+  wordBookStatsText: {
+    fontSize: 13,
+    color: COLORS.inkSoft,
+  },
+  wordBookStatsPercent: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.accent,
+  },
+  progressTrack: {
+    width: '100%',
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: COLORS.grayTrack,
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
+    borderRadius: 3,
+  },
+  progressFillAccent: {
+    backgroundColor: COLORS.accent,
+  },
+  progressFillWarm: {
+    backgroundColor: COLORS.warm,
+  },
+  sessionCard: {
     width: '100%',
     borderRadius: 16,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#ddd',
-    padding: 20,
-    gap: 6,
-    marginBottom: 16,
+    backgroundColor: COLORS.surface,
+    padding: 18,
+    gap: 14,
   },
-  panelCardTitle: {
+  sessionCardTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: COLORS.ink,
+  },
+  sessionBlock: {
+    gap: 8,
+  },
+  sessionBlockHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  sessionBlockTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.ink,
+  },
+  sessionBlockTarget: {
+    fontSize: 12,
+    color: COLORS.gray,
+  },
+  sessionBlockEmpty: {
+    fontSize: 13,
+    color: COLORS.gray,
+  },
+  sessionDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: COLORS.border,
+  },
+  statChipsRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  statChip: {
+    borderRadius: 10,
+    backgroundColor: COLORS.accentSoft,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    alignItems: 'flex-start',
+    gap: 1,
+  },
+  statChipValue: {
     fontSize: 17,
     fontWeight: '700',
-    marginBottom: 2,
+    color: COLORS.ink,
   },
-  panelCardLine: {
-    fontSize: 14,
-    color: '#333',
+  statChipLabel: {
+    fontSize: 11,
+    color: COLORS.inkSoft,
   },
-  panelCardEmpty: {
-    fontSize: 14,
-    color: '#888',
+  primaryButton: {
+    marginTop: 4,
+    minHeight: 46,
+    borderRadius: 12,
+    backgroundColor: COLORS.ink,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+    width: '100%',
+  },
+  primaryButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  secondaryButton: {
+    marginTop: 4,
+    minHeight: 46,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.accent,
+    backgroundColor: 'transparent',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+    width: '100%',
+  },
+  secondaryButtonText: {
+    color: COLORS.accent,
+    fontSize: 16,
+    fontWeight: '700',
   },
   restartSection: {
     width: '100%',
     alignItems: 'center',
-    gap: 8,
-    marginTop: 4,
+    gap: 6,
   },
   dangerLinkButton: {
     minHeight: 44,
@@ -1289,41 +1665,60 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
   },
   dangerLinkButtonText: {
-    fontSize: 13,
-    color: '#d9534f',
-    textDecorationLine: 'underline',
-  },
-  exitLinkButton: {
-    marginTop: 12,
-    minHeight: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  exitLinkButtonText: {
-    fontSize: 14,
-    color: '#888',
-    textDecorationLine: 'underline',
+    fontSize: 12,
+    color: COLORS.danger,
   },
   card: {
     width: '100%',
-    borderRadius: 16,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#ddd',
+    borderRadius: 20,
+    backgroundColor: COLORS.surface,
     padding: 20,
-    gap: 8,
+    gap: 10,
   },
-  sessionHeaderText: {
-    fontSize: 13,
+  cardTopRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
+  cardProgressGroup: {
+    flex: 1,
+    gap: 6,
+  },
+  cardProgressText: {
+    fontSize: 12,
     fontWeight: '600',
-    color: '#888',
+    color: COLORS.gray,
+  },
+  exitButton: {
+    minWidth: 32,
+    minHeight: 32,
+    borderRadius: 16,
+    backgroundColor: COLORS.grayTrack,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cardHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 10,
   },
   word: {
-    fontSize: 24,
+    flex: 1,
+    fontSize: 28,
     fontWeight: '700',
+    color: COLORS.ink,
+  },
+  bookmarkButton: {
+    minWidth: 40,
+    minHeight: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   pronunciationRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexWrap: 'wrap',
     gap: 10,
   },
   ipaGroup: {
@@ -1333,14 +1728,14 @@ const styles = StyleSheet.create({
   },
   ipa: {
     fontSize: 15,
-    color: '#666',
+    color: COLORS.inkSoft,
   },
   accentBadge: {
     fontSize: 10,
     fontWeight: '600',
-    color: '#999',
+    color: COLORS.gray,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#ccc',
+    borderColor: COLORS.border,
     borderRadius: 4,
     paddingHorizontal: 4,
     paddingVertical: 1,
@@ -1349,17 +1744,11 @@ const styles = StyleSheet.create({
   partOfSpeech: {
     fontSize: 13,
     fontStyle: 'italic',
-    color: '#888',
+    color: COLORS.gray,
   },
   speakerButton: {
-    minWidth: 44,
-    minHeight: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  bookmarkButton: {
-    minWidth: 44,
-    minHeight: 44,
+    minWidth: 32,
+    minHeight: 32,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1369,10 +1758,10 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   smallRetryButton: {
-    minHeight: 44,
+    minHeight: 32,
     borderRadius: 8,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#2f95dc',
+    borderColor: COLORS.accent,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 12,
@@ -1380,130 +1769,223 @@ const styles = StyleSheet.create({
   smallRetryButtonText: {
     fontSize: 13,
     fontWeight: '600',
-    color: '#2f95dc',
+    color: COLORS.accent,
   },
-  recognitionProgress: {
-    fontSize: 13,
+  divider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: COLORS.border,
+  },
+  recognitionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  recognitionLabel: {
+    fontSize: 12,
     fontWeight: '600',
-    color: '#2f95dc',
+    color: COLORS.gray,
+  },
+  dotsRow: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  dot: {
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+    backgroundColor: COLORS.grayTrack,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.border,
+  },
+  dotFilled: {
+    backgroundColor: COLORS.accent,
+    borderColor: COLORS.accent,
+  },
+  fieldBlock: {
+    gap: 2,
+  },
+  fieldLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.4,
+    color: COLORS.gray,
+    textTransform: 'uppercase',
   },
   meaning: {
-    fontSize: 16,
-    color: '#333',
-    marginBottom: 8,
-  },
-  sectionLabel: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#888',
-    marginTop: 8,
+    fontSize: 17,
+    lineHeight: 24,
+    color: COLORS.ink,
   },
   example: {
     fontSize: 15,
     lineHeight: 22,
+    color: COLORS.inkSoft,
   },
   translation: {
-    fontSize: 15,
-    lineHeight: 22,
-    color: '#333',
-  },
-  statusText: {
-    fontSize: 13,
-    color: '#888',
-  },
-  errorText: {
-    fontSize: 13,
-    color: '#d9534f',
-  },
-  hintText: {
-    fontSize: 13,
-    color: '#888',
-    marginTop: 4,
-  },
-  retryButton: {
-    marginTop: 12,
-    minHeight: 44,
-    borderRadius: 10,
-    backgroundColor: '#2f95dc',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 16,
-  },
-  retryButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
+    fontSize: 14,
+    lineHeight: 20,
+    color: COLORS.gray,
   },
   choiceRow: {
     flexDirection: 'row',
     gap: 8,
-    marginTop: 12,
+    marginTop: 8,
   },
   choiceButton: {
     flex: 1,
-    minHeight: 44,
-    borderRadius: 10,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#ccc',
+    minHeight: 46,
+    borderRadius: 12,
+    borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 4,
   },
   choiceButtonText: {
     fontSize: 15,
-    fontWeight: '600',
-    color: '#333',
+    fontWeight: '700',
   },
-  summaryTitle: {
+  choiceButtonNeutral: {
+    backgroundColor: COLORS.grayTrack,
+    borderColor: COLORS.border,
+  },
+  choiceButtonTextNeutral: {
+    color: COLORS.inkSoft,
+  },
+  choiceButtonWarm: {
+    backgroundColor: COLORS.warmSoft,
+    borderColor: COLORS.warm,
+  },
+  choiceButtonTextWarm: {
+    color: COLORS.warmDark,
+  },
+  choiceButtonPrimary: {
+    backgroundColor: COLORS.ink,
+    borderColor: COLORS.ink,
+  },
+  choiceButtonTextPrimary: {
+    color: '#fff',
+  },
+  summaryCard: {
+    width: '100%',
+    borderRadius: 20,
+    backgroundColor: COLORS.surface,
+    padding: 20,
+    gap: 12,
+  },
+  summaryBadge: {
+    alignSelf: 'flex-start',
+    borderRadius: 8,
+    backgroundColor: COLORS.accentSoft,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  summaryBadgePaused: {
+    backgroundColor: COLORS.warmSoft,
+  },
+  summaryBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.accent,
+  },
+  summaryBadgeTextPaused: {
+    color: COLORS.warmDark,
+  },
+  summaryHero: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: COLORS.ink,
+  },
+  summaryNote: {
+    fontSize: 13,
+    color: COLORS.gray,
+  },
+  summaryHeroStatRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 4,
+    marginTop: 4,
+  },
+  summaryHeroStatValue: {
+    fontSize: 34,
+    fontWeight: '800',
+    color: COLORS.ink,
+  },
+  summaryHeroStatDivider: {
+    fontSize: 18,
+    color: COLORS.gray,
+  },
+  summaryHeroStatTotal: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: COLORS.gray,
+  },
+  summaryHeroStatLabel: {
+    fontSize: 13,
+    color: COLORS.gray,
+    marginLeft: 4,
+  },
+  statGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  statGridItem: {
+    minWidth: '30%',
+    flexGrow: 1,
+    borderRadius: 10,
+    backgroundColor: COLORS.grayTrack,
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    gap: 1,
+  },
+  statGridValue: {
     fontSize: 18,
     fontWeight: '700',
-    marginBottom: 4,
+    color: COLORS.ink,
   },
-  summaryLine: {
-    fontSize: 15,
-    color: '#333',
+  statGridLabel: {
+    fontSize: 11,
+    color: COLORS.gray,
   },
-  primaryButton: {
-    marginTop: 8,
-    minHeight: 44,
-    borderRadius: 10,
-    backgroundColor: '#2f95dc',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 16,
+  sectionLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.gray,
+    marginTop: 4,
   },
-  primaryButtonText: {
-    color: '#fff',
-    fontSize: 16,
+  chipWrapRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  termChip: {
+    borderRadius: 8,
+    backgroundColor: COLORS.accentSoft,
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+  },
+  termChipText: {
+    fontSize: 13,
+    color: COLORS.ink,
     fontWeight: '600',
   },
-  secondaryButton: {
-    marginTop: 8,
-    minHeight: 44,
-    borderRadius: 10,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#2f95dc',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 16,
+  termChipWarm: {
+    borderRadius: 8,
+    backgroundColor: COLORS.warmSoft,
+    paddingVertical: 5,
+    paddingHorizontal: 10,
   },
-  secondaryButtonText: {
-    color: '#2f95dc',
-    fontSize: 16,
+  termChipWarmText: {
+    fontSize: 13,
+    color: COLORS.warmDark,
     fontWeight: '600',
   },
-  restartButton: {
-    marginTop: 16,
-    minHeight: 44,
-    borderRadius: 10,
-    backgroundColor: '#2f95dc',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 16,
+  summaryStatsFooterRow: {
+    gap: 2,
+    marginTop: 4,
   },
-  restartButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
+  summaryFooterText: {
+    fontSize: 12,
+    color: COLORS.gray,
   },
 });
