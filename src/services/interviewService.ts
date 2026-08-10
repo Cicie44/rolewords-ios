@@ -271,10 +271,25 @@ export async function removeInterviewCv(interviewSessionId: string): Promise<Int
     throw new Error('CV path does not match this session.');
   }
 
-  const { error: removeError } = await supabase.storage.from(CV_BUCKET).remove([expectedPath]);
+  // The database can point at a path that's already gone from Storage —
+  // e.g. a retry after a previous attempt's remove() succeeded but the
+  // follow-up database update failed. Checking first (rather than always
+  // calling remove()) makes that retry path explicit instead of relying on
+  // remove() silently no-op'ing for a missing object.
+  let fileExists: boolean;
+  try {
+    const { data: existsData } = await supabase.storage.from(CV_BUCKET).exists(expectedPath);
+    fileExists = existsData;
+  } catch {
+    throw new Error('Failed to check whether the CV file exists.');
+  }
 
-  if (removeError) {
-    throw new Error('Failed to remove CV file.');
+  if (fileExists) {
+    const { error: removeError } = await supabase.storage.from(CV_BUCKET).remove([expectedPath]);
+
+    if (removeError) {
+      throw new Error('Failed to remove CV file.');
+    }
   }
 
   const { data, error } = await supabase
@@ -291,9 +306,10 @@ export async function removeInterviewCv(interviewSessionId: string): Promise<Int
     .single();
 
   if (error || !data) {
-    // The file is already gone from storage at this point; the database may
-    // still show the old path until a retry succeeds.
-    throw new Error('CV file removed, but failed to update the record.');
+    // Storage is already clean at this point (the file was removed just now,
+    // or was already gone); the database may still show the old path until
+    // a retry succeeds.
+    throw new Error('CV file storage cleanup succeeded, but failed to update the record.');
   }
 
   return rowToInterviewSession(data);
@@ -685,4 +701,70 @@ export async function fetchInterviewSessionDetail(
     session: rowToInterviewSessionSummary(sessionRow),
     questions: (questionRows ?? []).map(rowToInterviewQuestion),
   };
+}
+
+/**
+ * Permanently deletes one interview session: the uploaded CV (if any), the
+ * session row itself, and — via the existing interview_questions foreign
+ * key's ON DELETE CASCADE — every question and generated answer under it.
+ * Never touches saved_items; a user's bookmarks survive regardless of what
+ * they were sourced from.
+ *
+ * Privacy-first ordering: the CV is removed from private Storage (by
+ * delegating to removeInterviewCv, the same function the CV-management flow
+ * already uses) before the session row is deleted, so a failure partway
+ * through can never leave an orphaned CV file. Safe to call again after a
+ * partial failure — a session with no CV left skips straight to deleting the
+ * row, and a session that no longer exists (already deleted, or never
+ * belonged to this user) is treated as already deleted rather than an error.
+ * Genuine Storage/database failures are never swallowed.
+ */
+export async function deleteInterviewSession(interviewSessionId: string): Promise<void> {
+  const trimmedSessionId = interviewSessionId.trim();
+
+  if (trimmedSessionId.length === 0) {
+    throw new Error('Interview session id is required.');
+  }
+
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+
+  if (!session) {
+    throw new Error('Not authenticated.');
+  }
+
+  const { data: existingRow, error: fetchError } = await supabase
+    .from('interview_sessions')
+    .select('cv_storage_path')
+    .eq('id', trimmedSessionId)
+    .eq('user_id', session.user.id)
+    .maybeSingle();
+
+  if (fetchError) {
+    throw new Error('Failed to load interview session.');
+  }
+
+  if (!existingRow) {
+    // Nothing left to delete — either already deleted by a previous
+    // (possibly partially-failed) attempt, or it never belonged to this
+    // user. Both cases resolve as a successful no-op, matching
+    // fetchInterviewSessionDetail's existing "don't distinguish missing
+    // from someone else's" privacy stance.
+    return;
+  }
+
+  if (existingRow.cv_storage_path !== null) {
+    await removeInterviewCv(trimmedSessionId);
+  }
+
+  const { error: deleteError } = await supabase
+    .from('interview_sessions')
+    .delete()
+    .eq('id', trimmedSessionId)
+    .eq('user_id', session.user.id);
+
+  if (deleteError) {
+    throw new Error('Failed to delete interview session.');
+  }
 }

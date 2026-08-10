@@ -1,8 +1,9 @@
-import { useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Keyboard,
   KeyboardAvoidingView,
   Platform,
@@ -15,6 +16,7 @@ import {
 } from 'react-native';
 
 import {
+  deleteInterviewSession,
   fetchInterviewSessionDetail,
   generateInterviewAnswers,
   generateInterviewQuestions,
@@ -395,6 +397,10 @@ export default function InterviewSessionScreen() {
   const [answerFlowError, setAnswerFlowError] = useState<string | null>(null);
   const answerFlowRef = useRef(false);
 
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const deletingRef = useRef(false);
+
   const [detailLoadState, setDetailLoadState] = useState<DetailLoadState>('loading');
   const [loadedSession, setLoadedSession] = useState<InterviewSessionSummary | null>(null);
   const [detailRetryToken, setDetailRetryToken] = useState(0);
@@ -462,6 +468,7 @@ export default function InterviewSessionScreen() {
     setHasInconsistentQuestionData(false);
     setErrorMessage(null);
     setAnswerFlowError(null);
+    setDeleteError(null);
     setNotesByQuestionId({});
     setSavedNotesByQuestionId({});
     setSaveErrorsByQuestionId({});
@@ -597,6 +604,9 @@ export default function InterviewSessionScreen() {
   useFocusEffect(loadSavedItems);
 
   const handleToggleInterviewBookmark = async (target: InterviewBookmarkTarget) => {
+    if (deletingRef.current) {
+      return;
+    }
     if (savedLoadState !== 'loaded') {
       return;
     }
@@ -698,6 +708,9 @@ export default function InterviewSessionScreen() {
   };
 
   const handleSaveFragment = async () => {
+    if (deletingRef.current) {
+      return;
+    }
     if (fragmentSavingRef.current) {
       return;
     }
@@ -878,6 +891,10 @@ export default function InterviewSessionScreen() {
   };
 
   const saveQuestionNote = (questionId: string): Promise<boolean> => {
+    if (deletingRef.current) {
+      return Promise.resolve(false);
+    }
+
     const existingPromise = savePromisesByQuestionIdRef.current.get(questionId);
     if (existingPromise) {
       return existingPromise;
@@ -966,7 +983,7 @@ export default function InterviewSessionScreen() {
   };
 
   const handleGenerate = async () => {
-    if (generatingRef.current || id.length === 0) {
+    if (generatingRef.current || id.length === 0 || deletingRef.current) {
       return;
     }
 
@@ -987,7 +1004,7 @@ export default function InterviewSessionScreen() {
   };
 
   const handleGenerateAnswers = async () => {
-    if (answerFlowRef.current) {
+    if (answerFlowRef.current || deletingRef.current) {
       return;
     }
     if (id.length === 0) {
@@ -1041,6 +1058,87 @@ export default function InterviewSessionScreen() {
     }
   };
 
+  // Coarse, render-time approximation used only to visually disable the
+  // delete button — a cheap hint, not the actual safety check. React state
+  // can lag a tick behind a write that only touches refs, which is exactly
+  // why isAnyOperationInFlight (below) — not this — is what actually gates
+  // whether a delete is allowed to proceed.
+  const isBusyWithOtherOperation =
+    isGenerating || answerFlowPhase !== 'idle' || savingQuestionIds.size > 0;
+  const deleteButtonDisabled = isDeleting || isBusyWithOtherOperation;
+
+  // The authoritative concurrency check, re-read at call time from the same
+  // refs every write path already maintains — never from React state or
+  // from a value captured when the confirmation Alert was first opened, both
+  // of which can be stale by the time the user actually taps "删除" (e.g. a
+  // save that started while the Alert was open). Every one of this screen's
+  // network-writing entry points sets one of these refs before its first
+  // await, so this always reflects what's genuinely in flight right now.
+  const isAnyOperationInFlight = () =>
+    generatingRef.current ||
+    answerFlowRef.current ||
+    savePromisesByQuestionIdRef.current.size > 0 ||
+    fragmentSavingRef.current ||
+    bookmarkBusyKeyRef.current !== null;
+
+  const performDelete = async () => {
+    if (deletingRef.current) {
+      return;
+    }
+    if (isAnyOperationInFlight()) {
+      setDeleteError('请等待当前操作完成后再删除。');
+      return;
+    }
+
+    deletingRef.current = true;
+    setIsDeleting(true);
+    setDeleteError(null);
+
+    try {
+      await deleteInterviewSession(id);
+      // Pops back to the already-mounted history tab rather than pushing a
+      // new screen, so the back button can never re-enter this now-deleted
+      // detail — and useFocusEffect on that list re-runs as it regains focus.
+      // dismissTo can itself throw synchronously, which the catch below
+      // still handles.
+      router.dismissTo('/(tabs)/interview');
+      // Deliberately leave deletingRef/isDeleting set on success: this
+      // screen is being torn down, and clearing the delete lock here would
+      // briefly re-enable every write control while the dismiss
+      // transition/unmount is still in flight. Only a failure below resets
+      // them, since the page then stays put and must allow a retry.
+    } catch {
+      deletingRef.current = false;
+      setIsDeleting(false);
+      setDeleteError('删除失败，请检查网络后重试。');
+    }
+  };
+
+  const handleDeletePress = () => {
+    if (deletingRef.current) {
+      return;
+    }
+    if (isAnyOperationInFlight()) {
+      setDeleteError('请等待当前操作完成后再删除。');
+      return;
+    }
+
+    Alert.alert(
+      '删除面试记录',
+      '将永久删除本次面试记录、上传的 CV、问题和参考答案。生词本收藏不会删除，此操作无法撤销。',
+      [
+        { text: '取消', style: 'cancel' },
+        {
+          text: '删除',
+          style: 'destructive',
+          onPress: () => {
+            void performDelete();
+          },
+        },
+      ],
+    );
+  };
+
   if (id.length === 0) {
     return (
       <View style={styles.invalidContainer}>
@@ -1087,7 +1185,7 @@ export default function InterviewSessionScreen() {
   const answeredCount = questions ? questions.filter(hasGeneratedAnswer).length : 0;
   const isFullyAnswered = answeredCount === 10;
   const isPartiallyAnswered = answeredCount > 0 && answeredCount < 10;
-  const notesLocked = isFullyAnswered || answerFlowPhase !== 'idle';
+  const notesLocked = isFullyAnswered || answerFlowPhase !== 'idle' || isDeleting;
 
   return (
     <KeyboardAvoidingView
@@ -1124,10 +1222,10 @@ export default function InterviewSessionScreen() {
 
             <Pressable
               onPress={handleGenerate}
-              disabled={isGenerating}
+              disabled={isGenerating || isDeleting}
               accessibilityRole="button"
               accessibilityLabel="生成面试问题"
-              style={[styles.generateButton, isGenerating && styles.generateButtonDisabled]}>
+              style={[styles.generateButton, (isGenerating || isDeleting) && styles.generateButtonDisabled]}>
               {isGenerating ? (
                 <View style={styles.generateButtonRow}>
                   <ActivityIndicator color="#fff" />
@@ -1162,7 +1260,8 @@ export default function InterviewSessionScreen() {
             <View style={styles.questionsList}>
               {questions.map((question, index) => {
                 const questionKey = `question:${question.id}`;
-                const bookmarksDisabled = savedLoadState !== 'loaded' || bookmarkBusyKey !== null;
+                const bookmarksDisabled =
+                  savedLoadState !== 'loaded' || bookmarkBusyKey !== null || isDeleting;
 
                 const isFragmentSelected = answerSelection?.questionId === question.id;
                 const trimmedSelectionContent = isFragmentSelected
@@ -1182,7 +1281,8 @@ export default function InterviewSessionScreen() {
                   bookmarkBusyKey !== null ||
                   savedLoadState !== 'loaded' ||
                   fragmentSaveCategory === 'saved' ||
-                  trimmedSelectionContent.length === 0;
+                  trimmedSelectionContent.length === 0 ||
+                  isDeleting;
 
                 return (
                   <InterviewQuestionCard
@@ -1245,13 +1345,13 @@ export default function InterviewSessionScreen() {
 
                 <Pressable
                   onPress={handleGenerateAnswers}
-                  disabled={answerFlowPhase !== 'idle'}
+                  disabled={answerFlowPhase !== 'idle' || isDeleting}
                   accessibilityRole="button"
                   accessibilityLabel="生成面试参考答案"
                   style={[
                     styles.generateButton,
                     styles.answerGenerateButton,
-                    answerFlowPhase !== 'idle' && styles.generateButtonDisabled,
+                    (answerFlowPhase !== 'idle' || isDeleting) && styles.generateButtonDisabled,
                   ]}>
                   {answerFlowPhase === 'saving_notes' ? (
                     <View style={styles.generateButtonRow}>
@@ -1277,6 +1377,25 @@ export default function InterviewSessionScreen() {
             )}
           </>
         )}
+
+        <View style={styles.dangerZone}>
+          {deleteError && <Text style={styles.errorText}>{deleteError}</Text>}
+          <Pressable
+            onPress={handleDeletePress}
+            disabled={deleteButtonDisabled}
+            accessibilityRole="button"
+            accessibilityLabel={deleteError ? '重试删除面试记录' : '删除面试记录'}
+            style={[styles.deleteButton, deleteButtonDisabled && styles.generateButtonDisabled]}>
+            {isDeleting ? (
+              <View style={styles.generateButtonRow}>
+                <ActivityIndicator color="#fff" />
+                <Text style={styles.deleteButtonText}>正在删除…</Text>
+              </View>
+            ) : (
+              <Text style={styles.deleteButtonText}>{deleteError ? '重试删除' : '删除面试记录'}</Text>
+            )}
+          </Pressable>
+        </View>
       </ScrollView>
     </KeyboardAvoidingView>
   );
@@ -1543,5 +1662,21 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#8e8e93',
     textAlign: 'center',
+  },
+  dangerZone: {
+    marginTop: 24,
+    gap: 8,
+  },
+  deleteButton: {
+    minHeight: 44,
+    borderRadius: 10,
+    backgroundColor: '#d9534f',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  deleteButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
   },
 });
