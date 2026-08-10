@@ -9,7 +9,7 @@ const vocabDir = path.join(__dirname, '..', 'src', 'data', 'vocabulary');
 
 const EXPECTED_COUNTS = {
   developer: 500,
-  'project-manager': 10,
+  'project-manager': 500,
   'ai-research': 10,
 };
 
