@@ -10,7 +10,7 @@ const vocabDir = path.join(__dirname, '..', 'src', 'data', 'vocabulary');
 const EXPECTED_COUNTS = {
   developer: 500,
   'project-manager': 500,
-  'ai-research': 10,
+  'ai-research': 500,
 };
 
 const VALID_WORD_BOOK_IDS = new Set(Object.keys(EXPECTED_COUNTS));
