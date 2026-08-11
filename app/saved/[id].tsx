@@ -1,7 +1,7 @@
 import { useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import {
   playPronunciation,
@@ -12,6 +12,22 @@ import { fetchSavedItem } from '@/src/services/savedItemsService';
 import { fetchVocabularyItemById } from '@/src/services/vocabularyService';
 import type { SavedItem, SavedItemSourceType, SavedItemType } from '@/src/types/savedItem';
 import type { VocabularyItem } from '@/src/types/vocabulary';
+
+// Same restrained, warm-gray/ink-green iOS-native palette as the Learn page
+// and the Saved list. Scoped to this screen only — no global theme system,
+// no effect on other pages.
+const COLORS = {
+  background: '#F6F3EE',
+  surface: '#FFFFFF',
+  ink: '#1E362F',
+  inkSoft: '#4B6358',
+  accent: '#48715F',
+  accentSoft: '#E4EEE8',
+  gray: '#66666A',
+  grayTrack: '#EDEAE4',
+  border: '#E2DED7',
+  danger: '#B3483F',
+};
 
 type LoadState = 'loading' | 'loaded' | 'error' | 'not-found';
 
@@ -230,6 +246,7 @@ export default function SavedItemDetailScreen() {
     <ScrollView contentContainerStyle={styles.container}>
       {loadState === 'loading' && (
         <View style={styles.centerContent}>
+          <ActivityIndicator color={COLORS.ink} />
           <Text style={styles.statusText}>正在加载收藏详情…</Text>
         </View>
       )}
@@ -257,18 +274,8 @@ export default function SavedItemDetailScreen() {
         <View style={styles.card}>
           {vocabularyItem ? (
             <>
-              <Text style={styles.term}>{vocabularyItem.term}</Text>
-
-              <View style={styles.pronunciationRow}>
-                {vocabularyItem.ipa && (
-                  <View style={styles.ipaGroup}>
-                    <Text style={styles.ipa}>/{vocabularyItem.ipa}/</Text>
-                    <Text style={styles.accentBadge}>US</Text>
-                  </View>
-                )}
-                {vocabularyItem.partOfSpeech && (
-                  <Text style={styles.partOfSpeech}>{vocabularyItem.partOfSpeech}</Text>
-                )}
+              <View style={styles.headRow}>
+                <Text style={styles.term}>{vocabularyItem.term}</Text>
                 <Pressable
                   onPress={() =>
                     handleTogglePlayback(vocabularyItem.pronunciationText ?? vocabularyItem.term)
@@ -285,39 +292,59 @@ export default function SavedItemDetailScreen() {
                       android: isPlaying ? 'stop_circle' : 'volume_up',
                       web: isPlaying ? 'stop_circle' : 'volume_up',
                     }}
-                    tintColor="#2f95dc"
+                    tintColor={COLORS.accent}
                     size={20}
                   />
                 </Pressable>
               </View>
 
+              {(vocabularyItem.ipa || vocabularyItem.partOfSpeech) && (
+                <View style={styles.pronunciationRow}>
+                  {vocabularyItem.ipa && (
+                    <View style={styles.ipaGroup}>
+                      <Text style={styles.ipa}>/{vocabularyItem.ipa}/</Text>
+                      <Text style={styles.accentBadge}>US</Text>
+                    </View>
+                  )}
+                  {vocabularyItem.partOfSpeech && (
+                    <Text style={styles.partOfSpeech}>{vocabularyItem.partOfSpeech}</Text>
+                  )}
+                </View>
+              )}
+
+              <View style={styles.divider} />
+
               <Text style={styles.meaning}>{vocabularyItem.chineseMeaning}</Text>
 
               {vocabularyItem.englishDefinition && (
-                <>
-                  <Text style={styles.sectionLabel}>Definition</Text>
+                <View style={styles.fieldBlock}>
+                  <Text style={styles.fieldLabel}>Definition</Text>
                   <Text style={styles.example}>{vocabularyItem.englishDefinition}</Text>
-                </>
+                </View>
               )}
 
               {vocabularyItem.exampleSentence && (
-                <>
-                  <Text style={styles.sectionLabel}>Example</Text>
+                <View style={styles.fieldBlock}>
+                  <Text style={styles.fieldLabel}>Example</Text>
                   <Text style={styles.example}>{vocabularyItem.exampleSentence}</Text>
-                </>
+                </View>
               )}
 
               {vocabularyItem.exampleTranslation && (
-                <>
-                  <Text style={styles.sectionLabel}>翻译</Text>
+                <View style={styles.fieldBlock}>
+                  <Text style={styles.fieldLabel}>翻译</Text>
                   <Text style={styles.translation}>{vocabularyItem.exampleTranslation}</Text>
-                </>
+                </View>
               )}
 
-              <Text style={styles.metaLine}>
-                {ITEM_TYPE_LABELS[savedItem.itemType]} · 来源：
-                {SOURCE_TYPE_LABELS[savedItem.sourceType]}
-              </Text>
+              <View style={styles.metaRow}>
+                <View style={styles.metaTag}>
+                  <Text style={styles.metaTagText}>{ITEM_TYPE_LABELS[savedItem.itemType]}</Text>
+                </View>
+                <View style={styles.metaTag}>
+                  <Text style={styles.metaTagText}>{SOURCE_TYPE_LABELS[savedItem.sourceType]}</Text>
+                </View>
+              </View>
             </>
           ) : isLongFormContent ? (
             <>
@@ -335,7 +362,7 @@ export default function SavedItemDetailScreen() {
                       android: isPlaying ? 'stop_circle' : 'volume_up',
                       web: isPlaying ? 'stop_circle' : 'volume_up',
                     }}
-                    tintColor="#2f95dc"
+                    tintColor={COLORS.accent}
                     size={20}
                   />
                 </Pressable>
@@ -346,17 +373,21 @@ export default function SavedItemDetailScreen() {
               </Text>
 
               {savedItem.chineseText && (
-                <Text style={styles.meaning}>{savedItem.chineseText}</Text>
+                <Text style={styles.longFormChinese}>{savedItem.chineseText}</Text>
               )}
 
-              <Text style={styles.metaLine}>
-                {ITEM_TYPE_LABELS[savedItem.itemType]} · 来源：
-                {SOURCE_TYPE_LABELS[savedItem.sourceType]}
-              </Text>
+              <View style={styles.metaRow}>
+                <View style={styles.metaTag}>
+                  <Text style={styles.metaTagText}>{ITEM_TYPE_LABELS[savedItem.itemType]}</Text>
+                </View>
+                <View style={styles.metaTag}>
+                  <Text style={styles.metaTagText}>{SOURCE_TYPE_LABELS[savedItem.sourceType]}</Text>
+                </View>
+              </View>
             </>
           ) : (
             <>
-              <View style={styles.pronunciationRow}>
+              <View style={styles.headRow}>
                 <Text style={styles.term}>{savedItem.content}</Text>
                 <Pressable
                   onPress={() => handleTogglePlayback(savedItem.content)}
@@ -370,7 +401,7 @@ export default function SavedItemDetailScreen() {
                       android: isPlaying ? 'stop_circle' : 'volume_up',
                       web: isPlaying ? 'stop_circle' : 'volume_up',
                     }}
-                    tintColor="#2f95dc"
+                    tintColor={COLORS.accent}
                     size={20}
                   />
                 </Pressable>
@@ -380,10 +411,14 @@ export default function SavedItemDetailScreen() {
                 <Text style={styles.meaning}>{savedItem.chineseText}</Text>
               )}
 
-              <Text style={styles.metaLine}>
-                {ITEM_TYPE_LABELS[savedItem.itemType]} · 来源：
-                {SOURCE_TYPE_LABELS[savedItem.sourceType]}
-              </Text>
+              <View style={styles.metaRow}>
+                <View style={styles.metaTag}>
+                  <Text style={styles.metaTagText}>{ITEM_TYPE_LABELS[savedItem.itemType]}</Text>
+                </View>
+                <View style={styles.metaTag}>
+                  <Text style={styles.metaTagText}>{SOURCE_TYPE_LABELS[savedItem.sourceType]}</Text>
+                </View>
+              </View>
             </>
           )}
         </View>
@@ -396,7 +431,7 @@ const styles = StyleSheet.create({
   container: {
     flexGrow: 1,
     alignItems: 'center',
-    backgroundColor: '#F2F2F7',
+    backgroundColor: COLORS.background,
     padding: 20,
     paddingTop: 24,
   },
@@ -408,18 +443,18 @@ const styles = StyleSheet.create({
   },
   statusText: {
     fontSize: 15,
-    color: '#888',
+    color: COLORS.gray,
     textAlign: 'center',
   },
   errorText: {
     fontSize: 13,
-    color: '#d9534f',
+    color: COLORS.danger,
     textAlign: 'center',
   },
   retryButton: {
     minHeight: 44,
     borderRadius: 10,
-    backgroundColor: '#2f95dc',
+    backgroundColor: COLORS.ink,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 16,
@@ -431,20 +466,26 @@ const styles = StyleSheet.create({
   },
   card: {
     width: '100%',
-    borderRadius: 16,
-    backgroundColor: '#fff',
+    borderRadius: 20,
+    backgroundColor: COLORS.surface,
     padding: 20,
-    gap: 8,
+    gap: 12,
+  },
+  headRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
   },
   term: {
+    flex: 1,
     fontSize: 26,
     fontWeight: '700',
-    color: '#000',
-    flexShrink: 1,
+    color: COLORS.ink,
   },
   pronunciationRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexWrap: 'wrap',
     gap: 10,
   },
   ipaGroup: {
@@ -454,14 +495,14 @@ const styles = StyleSheet.create({
   },
   ipa: {
     fontSize: 15,
-    color: '#666',
+    color: COLORS.inkSoft,
   },
   accentBadge: {
     fontSize: 10,
     fontWeight: '600',
-    color: '#999',
+    color: COLORS.gray,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#ccc',
+    borderColor: COLORS.border,
     borderRadius: 4,
     paddingHorizontal: 4,
     paddingVertical: 1,
@@ -470,7 +511,7 @@ const styles = StyleSheet.create({
   partOfSpeech: {
     fontSize: 13,
     fontStyle: 'italic',
-    color: '#888',
+    color: COLORS.gray,
   },
   speakerButton: {
     minWidth: 44,
@@ -478,32 +519,50 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  divider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: COLORS.border,
+  },
   meaning: {
     fontSize: 18,
-    fontWeight: '500',
-    color: '#3c3c43',
-    marginBottom: 4,
-  },
-  sectionLabel: {
-    fontSize: 12,
     fontWeight: '600',
-    color: '#8e8e93',
-    marginTop: 16,
+    color: COLORS.ink,
+  },
+  fieldBlock: {
+    gap: 2,
+  },
+  fieldLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.4,
+    color: COLORS.gray,
+    textTransform: 'uppercase',
   },
   example: {
-    fontSize: 17,
-    lineHeight: 24,
-    color: '#000',
+    fontSize: 15,
+    lineHeight: 22,
+    color: COLORS.inkSoft,
   },
   translation: {
-    fontSize: 17,
-    lineHeight: 24,
-    color: '#3c3c43',
+    fontSize: 14,
+    lineHeight: 20,
+    color: COLORS.gray,
   },
-  metaLine: {
-    fontSize: 12,
-    color: '#8e8e93',
-    marginTop: 16,
+  metaRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 4,
+  },
+  metaTag: {
+    borderRadius: 6,
+    backgroundColor: COLORS.grayTrack,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  metaTagText: {
+    fontSize: 11,
+    color: COLORS.gray,
   },
   longFormHeaderRow: {
     flexDirection: 'row',
@@ -514,12 +573,17 @@ const styles = StyleSheet.create({
   longFormLabel: {
     fontSize: 13,
     fontWeight: '600',
-    color: '#8e8e93',
+    color: COLORS.gray,
   },
   longFormContent: {
     fontSize: 17,
     lineHeight: 26,
     fontWeight: '400',
-    color: '#000',
+    color: COLORS.ink,
+  },
+  longFormChinese: {
+    fontSize: 16,
+    lineHeight: 24,
+    color: COLORS.inkSoft,
   },
 });
