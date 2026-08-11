@@ -13,6 +13,29 @@ export {
 // Prevent the splash screen from auto-hiding before the app is ready.
 SplashScreen.preventAutoHideAsync();
 
+const COLORS = {
+  background: '#F6F3EE',
+  ink: '#1E362F',
+  border: '#E2DED7',
+  accent: '#48715F',
+  danger: '#B3483F',
+};
+
+// Keeps every other DefaultTheme field (fonts, dark, etc.) intact and only
+// overrides the color roles that need the warm-gray/ink-green palette.
+const AppTheme = {
+  ...DefaultTheme,
+  colors: {
+    ...DefaultTheme.colors,
+    primary: COLORS.accent,
+    background: COLORS.background,
+    card: COLORS.background,
+    text: COLORS.ink,
+    border: COLORS.border,
+    notification: COLORS.danger,
+  },
+};
+
 export default function RootLayout() {
   return (
     <AuthProvider>
@@ -39,8 +62,15 @@ function RootLayoutNav() {
   return (
     // v0.1 screens are only styled for a light background, so the app stays
     // in light mode regardless of the system appearance setting for now.
-    <ThemeProvider value={DefaultTheme}>
-      <Stack>
+    <ThemeProvider value={AppTheme}>
+      <Stack
+        screenOptions={{
+          headerStyle: { backgroundColor: COLORS.background },
+          headerTintColor: COLORS.ink,
+          headerTitleStyle: { fontWeight: '600' },
+          headerShadowVisible: false,
+          contentStyle: { backgroundColor: COLORS.background },
+        }}>
         <Stack.Protected guard={!session}>
           <Stack.Screen name="sign-in" options={{ headerShown: false }} />
         </Stack.Protected>

@@ -1,7 +1,14 @@
 import { SymbolView } from 'expo-symbols';
 import { Tabs } from 'expo-router';
+import { StyleSheet } from 'react-native';
 
-import Colors from '@/constants/Colors';
+const COLORS = {
+  background: '#F6F3EE',
+  surface: '#FFFFFF',
+  ink: '#1E362F',
+  gray: '#66666A',
+  border: '#E2DED7',
+};
 
 export default function TabLayout() {
   return (
@@ -9,7 +16,21 @@ export default function TabLayout() {
       screenOptions={{
         // v0.1 screens are only styled for a light background, so the tab
         // bar stays in light mode regardless of the system appearance setting.
-        tabBarActiveTintColor: Colors.light.tint,
+        tabBarActiveTintColor: COLORS.ink,
+        tabBarInactiveTintColor: COLORS.gray,
+        tabBarStyle: {
+          backgroundColor: COLORS.surface,
+          borderTopColor: COLORS.border,
+          borderTopWidth: StyleSheet.hairlineWidth,
+        },
+        tabBarLabelStyle: {
+          fontSize: 11,
+        },
+        headerStyle: {
+          backgroundColor: COLORS.background,
+        },
+        headerTintColor: COLORS.ink,
+        headerShadowVisible: false,
       }}>
       <Tabs.Screen
         name="index"
