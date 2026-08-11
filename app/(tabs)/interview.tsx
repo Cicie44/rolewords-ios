@@ -6,6 +6,23 @@ import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from '
 import { fetchInterviewSessions } from '@/src/services/interviewService';
 import type { InterviewSessionStatus, InterviewSessionSummary } from '@/src/types/interview';
 
+const COLORS = {
+  background: '#F6F3EE',
+  surface: '#FFFFFF',
+  ink: '#1E362F',
+  inkSoft: '#4B6358',
+  accent: '#48715F',
+  accentSoft: '#E4EEE8',
+  warm: '#B9814F',
+  warmDark: '#8C5C2E',
+  warmSoft: '#F5E9DA',
+  gray: '#66666A',
+  grayTrack: '#EDEAE4',
+  border: '#E2DED7',
+  danger: '#B3483F',
+  dangerSoft: '#F7E8E6',
+};
+
 type HistoryLoadState = 'loading' | 'loaded' | 'error';
 
 const STATUS_LABELS: Record<InterviewSessionStatus, string> = {
@@ -14,6 +31,16 @@ const STATUS_LABELS: Record<InterviewSessionStatus, string> = {
   answers_ready: '已生成答案',
   completed: '已完成',
   failed: '失败',
+};
+
+// Purely a display mapping — introduces no new business states or rules,
+// just how each existing InterviewSessionStatus renders as a small badge.
+const STATUS_BADGE_STYLES: Record<InterviewSessionStatus, { backgroundColor: string; color: string }> = {
+  draft: { backgroundColor: COLORS.grayTrack, color: COLORS.gray },
+  questions_ready: { backgroundColor: COLORS.warmSoft, color: COLORS.warmDark },
+  answers_ready: { backgroundColor: COLORS.accentSoft, color: COLORS.accent },
+  completed: { backgroundColor: COLORS.accentSoft, color: COLORS.accent },
+  failed: { backgroundColor: COLORS.dangerSoft, color: COLORS.danger },
 };
 
 function formatSessionDate(isoString: string): string {
@@ -89,7 +116,7 @@ export default function InterviewScreen() {
 
       {loadState === 'loading' && (
         <View style={styles.centerContent}>
-          <ActivityIndicator />
+          <ActivityIndicator color={COLORS.accent} />
           <Text style={styles.statusText}>正在加载面试记录…</Text>
         </View>
       )}
@@ -141,13 +168,22 @@ export default function InterviewScreen() {
                     {item.jobTitle}
                   </Text>
                   <View style={styles.rowMetaRow}>
-                    <Text style={styles.rowMeta}>{STATUS_LABELS[item.status]}</Text>
+                    <View
+                      style={[
+                        styles.statusBadge,
+                        { backgroundColor: STATUS_BADGE_STYLES[item.status].backgroundColor },
+                      ]}>
+                      <Text
+                        style={[styles.statusBadgeText, { color: STATUS_BADGE_STYLES[item.status].color }]}>
+                        {STATUS_LABELS[item.status]}
+                      </Text>
+                    </View>
                     <Text style={styles.rowMeta}>{formatSessionDate(item.createdAt)}</Text>
                   </View>
                 </View>
                 <SymbolView
                   name={{ ios: 'chevron.right', android: 'chevron_right', web: 'chevron_right' }}
-                  tintColor="#c7c7cc"
+                  tintColor={COLORS.gray}
                   size={14}
                 />
               </Pressable>
@@ -162,20 +198,20 @@ export default function InterviewScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#F2F2F7',
+    backgroundColor: COLORS.background,
     paddingTop: 14,
     paddingHorizontal: 16,
   },
   newButton: {
     minHeight: 48,
-    borderRadius: 10,
-    backgroundColor: '#2f95dc',
+    borderRadius: 12,
+    backgroundColor: COLORS.ink,
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 16,
   },
   newButtonText: {
-    color: '#fff',
+    color: COLORS.surface,
     fontSize: 16,
     fontWeight: '600',
   },
@@ -187,29 +223,29 @@ const styles = StyleSheet.create({
   },
   statusText: {
     fontSize: 15,
-    color: '#8e8e93',
+    color: COLORS.inkSoft,
     textAlign: 'center',
   },
   statusSubText: {
     fontSize: 13,
-    color: '#8e8e93',
+    color: COLORS.gray,
     textAlign: 'center',
   },
   errorText: {
     fontSize: 13,
-    color: '#d9534f',
+    color: COLORS.danger,
     textAlign: 'center',
   },
   retryButton: {
     minHeight: 44,
     borderRadius: 10,
-    backgroundColor: '#2f95dc',
+    backgroundColor: COLORS.ink,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 16,
   },
   retryButtonText: {
-    color: '#fff',
+    color: COLORS.surface,
     fontSize: 16,
     fontWeight: '600',
   },
@@ -222,21 +258,21 @@ const styles = StyleSheet.create({
   historyTitle: {
     fontSize: 15,
     fontWeight: '600',
-    color: '#000',
+    color: COLORS.ink,
   },
   historyCount: {
     fontSize: 13,
-    color: '#8e8e93',
+    color: COLORS.gray,
   },
   list: {
     flex: 1,
   },
   // Only the actual rows get the white rounded background — since this
   // sizes to content (no flexGrow), it never stretches past the last row,
-  // and any leftover space below stays the page's gray.
+  // and any leftover space below stays the page's warm gray.
   listContent: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
+    backgroundColor: COLORS.surface,
+    borderRadius: 14,
     overflow: 'hidden',
   },
   row: {
@@ -246,11 +282,11 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     paddingHorizontal: 16,
     gap: 12,
-    backgroundColor: '#fff',
+    backgroundColor: COLORS.surface,
   },
   separator: {
     height: StyleSheet.hairlineWidth,
-    backgroundColor: '#c6c6c8',
+    backgroundColor: COLORS.border,
     marginLeft: 16,
   },
   rowTextGroup: {
@@ -260,19 +296,29 @@ const styles = StyleSheet.create({
   companyName: {
     fontSize: 17,
     fontWeight: '600',
-    color: '#000',
+    color: COLORS.ink,
   },
   jobTitle: {
     fontSize: 14,
-    color: '#3c3c43',
+    color: COLORS.inkSoft,
   },
   rowMetaRow: {
     flexDirection: 'row',
+    alignItems: 'center',
     gap: 8,
-    marginTop: 2,
+    marginTop: 4,
+  },
+  statusBadge: {
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  statusBadgeText: {
+    fontSize: 11,
+    fontWeight: '600',
   },
   rowMeta: {
     fontSize: 12,
-    color: '#8e8e93',
+    color: COLORS.gray,
   },
 });

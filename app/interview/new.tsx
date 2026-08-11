@@ -1,5 +1,6 @@
 import * as DocumentPicker from 'expo-document-picker';
 import { router } from 'expo-router';
+import { SymbolView } from 'expo-symbols';
 import { useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -19,6 +20,23 @@ import {
   uploadInterviewCv,
 } from '@/src/services/interviewService';
 import type { CreateInterviewDraftInput } from '@/src/types/interview';
+
+const COLORS = {
+  background: '#F6F3EE',
+  surface: '#FFFFFF',
+  ink: '#1E362F',
+  inkSoft: '#4B6358',
+  accent: '#48715F',
+  accentSoft: '#E4EEE8',
+  warm: '#B9814F',
+  warmDark: '#8C5C2E',
+  warmSoft: '#F5E9DA',
+  gray: '#66666A',
+  grayTrack: '#EDEAE4',
+  border: '#E2DED7',
+  danger: '#B3483F',
+  dangerSoft: '#F7E8E6',
+};
 
 type PickedFile = {
   uri: string;
@@ -140,12 +158,14 @@ export default function NewInterviewScreen() {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
         <View style={styles.card}>
+          <Text style={styles.sectionTitle}>岗位信息</Text>
+
           <Text style={styles.label}>岗位名称</Text>
           <TextInput
             value={jobTitle}
             onChangeText={setJobTitle}
             placeholder="例如：iOS Developer"
-            placeholderTextColor="#999"
+            placeholderTextColor={COLORS.gray}
             editable={!isSubmitting}
             accessibilityLabel="岗位名称"
             style={styles.input}
@@ -156,27 +176,34 @@ export default function NewInterviewScreen() {
             value={companyName}
             onChangeText={setCompanyName}
             placeholder="例如：ACME Inc."
-            placeholderTextColor="#999"
+            placeholderTextColor={COLORS.gray}
             editable={!isSubmitting}
             accessibilityLabel="公司名称"
             style={styles.input}
           />
 
-          <Text style={styles.label}>Job Description（选填）</Text>
+          <View style={styles.sectionDivider} />
+          <Text style={styles.sectionTitle}>Job Description（选填）</Text>
           <TextInput
             value={jobDescription}
             onChangeText={setJobDescription}
             placeholder="粘贴职位描述（可选）"
-            placeholderTextColor="#999"
+            placeholderTextColor={COLORS.gray}
             multiline
             editable={!isSubmitting}
             accessibilityLabel="Job Description"
             style={[styles.input, styles.multilineInput]}
           />
 
-          <Text style={styles.label}>简历 CV（PDF）</Text>
+          <View style={styles.sectionDivider} />
+          <Text style={styles.sectionTitle}>简历 CV</Text>
           {pickedFile ? (
             <View style={styles.fileRow}>
+              <SymbolView
+                name={{ ios: 'doc.fill', android: 'description', web: 'description' }}
+                tintColor={COLORS.accent}
+                size={20}
+              />
               <Text style={styles.fileName} numberOfLines={1}>
                 {pickedFile.name}
               </Text>
@@ -197,9 +224,15 @@ export default function NewInterviewScreen() {
               accessibilityRole="button"
               accessibilityLabel="选择 PDF 简历"
               style={styles.pickButton}>
+              <SymbolView
+                name={{ ios: 'doc.badge.plus', android: 'note_add', web: 'note_add' }}
+                tintColor={COLORS.accent}
+                size={22}
+              />
               <Text style={styles.pickButtonText}>选择 PDF 文件</Text>
             </Pressable>
           )}
+          <Text style={styles.privacyNote}>CV 仅用于本次面试问题和参考答案生成。</Text>
 
           {errorMessage && <Text style={styles.error}>{errorMessage}</Text>}
 
@@ -210,7 +243,7 @@ export default function NewInterviewScreen() {
             accessibilityLabel="创建面试准备"
             style={[styles.submitButton, !canSubmit && styles.submitButtonDisabled]}>
             {isSubmitting ? (
-              <ActivityIndicator color="#fff" />
+              <ActivityIndicator color={COLORS.surface} />
             ) : (
               <Text style={styles.submitButtonText}>创建面试准备</Text>
             )}
@@ -224,52 +257,65 @@ export default function NewInterviewScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#F2F2F7',
+    backgroundColor: COLORS.background,
   },
   scrollContent: {
     padding: 16,
     paddingTop: 14,
   },
   card: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 16,
+    backgroundColor: COLORS.surface,
+    borderRadius: 14,
+    padding: 18,
     gap: 8,
+  },
+  sectionTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: COLORS.ink,
+    marginBottom: 2,
+  },
+  sectionDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: COLORS.border,
+    marginTop: 14,
+    marginBottom: 4,
   },
   label: {
     fontSize: 13,
-    color: '#8e8e93',
+    color: COLORS.inkSoft,
     marginTop: 12,
   },
   input: {
     minHeight: 44,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#c6c6c8',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.surface,
     borderRadius: 10,
     paddingHorizontal: 14,
     paddingVertical: 10,
     fontSize: 16,
-    color: '#000',
+    color: COLORS.ink,
   },
   multilineInput: {
-    minHeight: 88,
+    minHeight: 110,
+    paddingTop: 12,
     textAlignVertical: 'top',
   },
   fileRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
     minHeight: 44,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#c6c6c8',
+    borderWidth: 1,
+    borderColor: COLORS.border,
     borderRadius: 10,
     paddingHorizontal: 14,
-    gap: 12,
+    gap: 10,
   },
   fileName: {
     flex: 1,
     fontSize: 15,
-    color: '#000',
+    color: COLORS.ink,
   },
   fileChangeButton: {
     minHeight: 44,
@@ -277,31 +323,39 @@ const styles = StyleSheet.create({
   },
   fileChangeButtonText: {
     fontSize: 15,
-    color: '#2f95dc',
+    color: COLORS.accent,
     fontWeight: '600',
   },
   pickButton: {
-    minHeight: 44,
+    flexDirection: 'row',
+    minHeight: 48,
     borderRadius: 10,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#2f95dc',
+    borderWidth: 1,
+    borderColor: COLORS.accent,
+    backgroundColor: COLORS.accentSoft,
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 8,
   },
   pickButtonText: {
     fontSize: 16,
-    color: '#2f95dc',
+    color: COLORS.accent,
     fontWeight: '600',
+  },
+  privacyNote: {
+    fontSize: 12,
+    color: COLORS.gray,
+    marginTop: 6,
   },
   error: {
     fontSize: 13,
-    color: '#d9534f',
+    color: COLORS.danger,
     marginTop: 8,
   },
   submitButton: {
-    minHeight: 44,
+    minHeight: 48,
     borderRadius: 10,
-    backgroundColor: '#2f95dc',
+    backgroundColor: COLORS.ink,
     alignItems: 'center',
     justifyContent: 'center',
     marginTop: 16,
@@ -310,7 +364,7 @@ const styles = StyleSheet.create({
     opacity: 0.5,
   },
   submitButtonText: {
-    color: '#fff',
+    color: COLORS.surface,
     fontSize: 16,
     fontWeight: '600',
   },

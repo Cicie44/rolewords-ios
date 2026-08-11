@@ -36,6 +36,23 @@ import type {
 } from '@/src/types/interview';
 import type { SavedItem, SavedItemType } from '@/src/types/savedItem';
 
+const COLORS = {
+  background: '#F6F3EE',
+  surface: '#FFFFFF',
+  ink: '#1E362F',
+  inkSoft: '#4B6358',
+  accent: '#48715F',
+  accentSoft: '#E4EEE8',
+  warm: '#B9814F',
+  warmDark: '#8C5C2E',
+  warmSoft: '#F5E9DA',
+  gray: '#66666A',
+  grayTrack: '#EDEAE4',
+  border: '#E2DED7',
+  danger: '#B3483F',
+  dangerSoft: '#F7E8E6',
+};
+
 const QUESTION_TYPE_LABELS: Record<InterviewQuestionType, string> = {
   behavioral: '行为类',
   technical: '技术类',
@@ -226,35 +243,39 @@ function InterviewQuestionCard({
   return (
     <View style={styles.questionCard}>
       <View style={styles.questionHeaderRow}>
-        <Text style={styles.questionIndex}>问题 {index + 1}</Text>
-        <View style={styles.questionHeaderRight}>
-          <Text style={styles.questionTypeLabel}>{QUESTION_TYPE_LABELS[question.questionType]}</Text>
-          <Pressable
-            onPress={onToggleQuestionBookmark}
-            disabled={bookmarksDisabled}
-            accessibilityRole="button"
-            accessibilityLabel={
-              isQuestionSaved ? `取消收藏问题 ${index + 1}` : `收藏问题 ${index + 1}`
-            }
-            style={[styles.bookmarkButton, bookmarksDisabled && styles.bookmarkButtonDisabled]}>
-            {questionBookmarkBusy ? (
-              <ActivityIndicator size="small" color="#2f95dc" />
-            ) : (
-              <SymbolView
-                name={{
-                  ios: isQuestionSaved ? 'bookmark.fill' : 'bookmark',
-                  android: isQuestionSaved ? 'bookmark' : 'bookmark_border',
-                  web: isQuestionSaved ? 'bookmark' : 'bookmark_border',
-                }}
-                tintColor="#2f95dc"
-                size={20}
-              />
-            )}
-          </Pressable>
+        <View style={styles.questionHeaderLeft}>
+          <Text style={styles.questionIndex}>问题 {index + 1}</Text>
+          <View style={styles.questionTypeBadge}>
+            <Text style={styles.questionTypeLabel}>{QUESTION_TYPE_LABELS[question.questionType]}</Text>
+          </View>
         </View>
+        <Pressable
+          onPress={onToggleQuestionBookmark}
+          disabled={bookmarksDisabled}
+          accessibilityRole="button"
+          accessibilityLabel={
+            isQuestionSaved ? `取消收藏问题 ${index + 1}` : `收藏问题 ${index + 1}`
+          }
+          style={[styles.bookmarkButton, bookmarksDisabled && styles.bookmarkButtonDisabled]}>
+          {questionBookmarkBusy ? (
+            <ActivityIndicator size="small" color={COLORS.accent} />
+          ) : (
+            <SymbolView
+              name={{
+                ios: isQuestionSaved ? 'bookmark.fill' : 'bookmark',
+                android: isQuestionSaved ? 'bookmark' : 'bookmark_border',
+                web: isQuestionSaved ? 'bookmark' : 'bookmark_border',
+              }}
+              tintColor={COLORS.accent}
+              size={20}
+            />
+          )}
+        </Pressable>
       </View>
       <Text style={styles.questionText}>{question.questionText}</Text>
       {questionBookmarkError && <Text style={styles.errorText}>{questionBookmarkError}</Text>}
+
+      <View style={styles.cardDivider} />
 
       <Text style={styles.noteLabel}>你的经历或回答要点（可选）</Text>
       <TextInput
@@ -265,7 +286,7 @@ function InterviewQuestionCard({
         multiline
         textAlignVertical="top"
         placeholder="可以补充相关项目、经历或想强调的内容"
-        placeholderTextColor="#999"
+        placeholderTextColor={COLORS.gray}
         accessibilityLabel={`问题 ${index + 1} 的回答要点`}
         style={[styles.noteInput, (disabled || isSaving) && styles.noteInputDisabled]}
       />
@@ -289,21 +310,24 @@ function InterviewQuestionCard({
 
       {hasGeneratedAnswer(question) && (
         <>
+          <View style={styles.cardDivider} />
           <Text style={styles.answerLabel}>参考答案</Text>
-          <TextInput
-            value={question.generatedAnswer ?? ''}
-            editable={false}
-            multiline
-            scrollEnabled={false}
-            contextMenuHidden={false}
-            selectionColor="#2f95dc"
-            onSelectionChange={(event) => {
-              const { start, end } = event.nativeEvent.selection;
-              onAnswerSelectionChange(start, end);
-            }}
-            accessibilityLabel={`问题 ${index + 1} 的参考答案，长按可选择文字`}
-            style={styles.answerText}
-          />
+          <View style={styles.answerBox}>
+            <TextInput
+              value={question.generatedAnswer ?? ''}
+              editable={false}
+              multiline
+              scrollEnabled={false}
+              contextMenuHidden={false}
+              selectionColor={COLORS.accent}
+              onSelectionChange={(event) => {
+                const { start, end } = event.nativeEvent.selection;
+                onAnswerSelectionChange(start, end);
+              }}
+              accessibilityLabel={`问题 ${index + 1} 的参考答案，长按可选择文字`}
+              style={styles.answerText}
+            />
+          </View>
 
           {fragmentSelectionContent && (
             <View style={styles.fragmentSelectionBox}>
@@ -335,12 +359,12 @@ function InterviewQuestionCard({
                   ]}>
                   {fragmentSavePhase === 'generating_chinese' ? (
                     <View style={styles.fragmentSaveButtonRow}>
-                      <ActivityIndicator size="small" color="#fff" />
+                      <ActivityIndicator size="small" color={COLORS.surface} />
                       <Text style={styles.fragmentSaveButtonText}>正在生成中文…</Text>
                     </View>
                   ) : fragmentSavePhase === 'saving' ? (
                     <View style={styles.fragmentSaveButtonRow}>
-                      <ActivityIndicator size="small" color="#fff" />
+                      <ActivityIndicator size="small" color={COLORS.surface} />
                       <Text style={styles.fragmentSaveButtonText}>正在收藏…</Text>
                     </View>
                   ) : (
@@ -1150,7 +1174,7 @@ export default function InterviewSessionScreen() {
   if (detailLoadState === 'loading') {
     return (
       <View style={styles.invalidContainer}>
-        <ActivityIndicator />
+        <ActivityIndicator color={COLORS.accent} />
         <Text style={styles.invalidText}>正在加载面试记录…</Text>
       </View>
     );
@@ -1193,9 +1217,18 @@ export default function InterviewSessionScreen() {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
         {(displayJobTitle || displayCompanyName) && (
-          <Text style={styles.subtitle}>
-            {displayCompanyName} · {displayJobTitle}
-          </Text>
+          <View style={styles.headerCard}>
+            {displayCompanyName ? (
+              <Text style={styles.headerCompany} numberOfLines={1}>
+                {displayCompanyName}
+              </Text>
+            ) : null}
+            {displayJobTitle ? (
+              <Text style={styles.headerJobTitle} numberOfLines={1}>
+                {displayJobTitle}
+              </Text>
+            ) : null}
+          </View>
         )}
 
         {hasInconsistentQuestionData ? (
@@ -1228,7 +1261,7 @@ export default function InterviewSessionScreen() {
               style={[styles.generateButton, (isGenerating || isDeleting) && styles.generateButtonDisabled]}>
               {isGenerating ? (
                 <View style={styles.generateButtonRow}>
-                  <ActivityIndicator color="#fff" />
+                  <ActivityIndicator color={COLORS.surface} />
                   <Text style={styles.generateButtonText}>正在生成面试问题…</Text>
                 </View>
               ) : (
@@ -1327,7 +1360,7 @@ export default function InterviewSessionScreen() {
             </View>
 
             {isPartiallyAnswered && (
-              <View style={styles.introCard}>
+              <View style={styles.noticeCard}>
                 <Text style={styles.errorText}>参考答案数据不完整，请稍后重试。</Text>
               </View>
             )}
@@ -1355,12 +1388,12 @@ export default function InterviewSessionScreen() {
                   ]}>
                   {answerFlowPhase === 'saving_notes' ? (
                     <View style={styles.generateButtonRow}>
-                      <ActivityIndicator color="#fff" />
+                      <ActivityIndicator color={COLORS.surface} />
                       <Text style={styles.generateButtonText}>正在保存回答要点…</Text>
                     </View>
                   ) : answerFlowPhase === 'generating_answers' ? (
                     <View style={styles.generateButtonRow}>
-                      <ActivityIndicator color="#fff" />
+                      <ActivityIndicator color={COLORS.surface} />
                       <Text style={styles.generateButtonText}>正在生成参考答案…</Text>
                     </View>
                   ) : (
@@ -1371,9 +1404,11 @@ export default function InterviewSessionScreen() {
             )}
 
             {isFullyAnswered && (
-              <Text style={styles.fullyAnsweredNotice}>
-                参考答案已生成，当前版本暂不支持重新生成。
-              </Text>
+              <View style={styles.noticeCard}>
+                <Text style={styles.fullyAnsweredNotice}>
+                  参考答案已生成，当前版本暂不支持重新生成。
+                </Text>
+              </View>
             )}
           </>
         )}
@@ -1385,10 +1420,10 @@ export default function InterviewSessionScreen() {
             disabled={deleteButtonDisabled}
             accessibilityRole="button"
             accessibilityLabel={deleteError ? '重试删除面试记录' : '删除面试记录'}
-            style={[styles.deleteButton, deleteButtonDisabled && styles.generateButtonDisabled]}>
+            style={[styles.deleteButton, deleteButtonDisabled && styles.deleteButtonDisabledStyle]}>
             {isDeleting ? (
               <View style={styles.generateButtonRow}>
-                <ActivityIndicator color="#fff" />
+                <ActivityIndicator color={COLORS.danger} />
                 <Text style={styles.deleteButtonText}>正在删除…</Text>
               </View>
             ) : (
@@ -1406,66 +1441,83 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#F2F2F7',
+    backgroundColor: COLORS.background,
     padding: 20,
     gap: 12,
   },
   invalidText: {
     fontSize: 15,
-    color: '#8e8e93',
+    color: COLORS.inkSoft,
     textAlign: 'center',
   },
   detailActionButton: {
     minHeight: 44,
     borderRadius: 10,
-    backgroundColor: '#2f95dc',
+    backgroundColor: COLORS.ink,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 20,
   },
   detailActionButtonText: {
-    color: '#fff',
+    color: COLORS.surface,
     fontSize: 16,
     fontWeight: '600',
   },
   flexContainer: {
     flex: 1,
-    backgroundColor: '#F2F2F7',
+    backgroundColor: COLORS.background,
   },
   container: {
     flexGrow: 1,
-    backgroundColor: '#F2F2F7',
+    backgroundColor: COLORS.background,
     padding: 16,
     paddingTop: 14,
     gap: 12,
   },
-  subtitle: {
-    fontSize: 13,
-    color: '#8e8e93',
+  headerCard: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 14,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    gap: 2,
+  },
+  headerCompany: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: COLORS.ink,
+  },
+  headerJobTitle: {
+    fontSize: 14,
+    color: COLORS.inkSoft,
   },
   introCard: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
+    backgroundColor: COLORS.surface,
+    borderRadius: 14,
     padding: 16,
     gap: 10,
+  },
+  noticeCard: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 14,
+    padding: 14,
   },
   introText: {
     fontSize: 17,
     lineHeight: 24,
-    color: '#000',
+    color: COLORS.ink,
   },
   consentText: {
     fontSize: 12,
-    color: '#8e8e93',
+    color: COLORS.gray,
   },
   errorText: {
     fontSize: 13,
-    color: '#d9534f',
+    color: COLORS.danger,
   },
   generateButton: {
     minHeight: 44,
     borderRadius: 10,
-    backgroundColor: '#2f95dc',
+    backgroundColor: COLORS.ink,
     alignItems: 'center',
     justifyContent: 'center',
     marginTop: 8,
@@ -1482,7 +1534,7 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   generateButtonText: {
-    color: '#fff',
+    color: COLORS.surface,
     fontSize: 16,
     fontWeight: '600',
   },
@@ -1490,8 +1542,8 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   questionCard: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
+    backgroundColor: COLORS.surface,
+    borderRadius: 14,
     padding: 16,
     gap: 8,
   },
@@ -1500,19 +1552,27 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  questionHeaderRight: {
+  questionHeaderLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: 8,
+    flexShrink: 1,
   },
   questionIndex: {
     fontSize: 13,
     fontWeight: '600',
-    color: '#3c3c43',
+    color: COLORS.inkSoft,
+  },
+  questionTypeBadge: {
+    backgroundColor: COLORS.accentSoft,
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
   },
   questionTypeLabel: {
-    fontSize: 12,
-    color: '#8e8e93',
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.accent,
   },
   bookmarkButton: {
     minWidth: 44,
@@ -1527,7 +1587,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: '#fff',
+    backgroundColor: COLORS.dangerSoft,
     borderRadius: 12,
     minHeight: 44,
     paddingVertical: 6,
@@ -1535,7 +1595,7 @@ const styles = StyleSheet.create({
   },
   savedErrorBannerText: {
     fontSize: 13,
-    color: '#8e8e93',
+    color: COLORS.inkSoft,
   },
   savedErrorRetryButton: {
     minHeight: 44,
@@ -1547,34 +1607,40 @@ const styles = StyleSheet.create({
   savedErrorRetryButtonText: {
     fontSize: 14,
     fontWeight: '600',
-    color: '#2f95dc',
+    color: COLORS.accent,
   },
   questionText: {
     fontSize: 17,
     lineHeight: 24,
-    color: '#000',
+    color: COLORS.ink,
+  },
+  cardDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: COLORS.border,
+    marginVertical: 4,
   },
   noteLabel: {
     fontSize: 12,
-    color: '#8e8e93',
+    color: COLORS.gray,
     marginTop: 4,
   },
   noteInput: {
     minHeight: 88,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#c6c6c8',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.surface,
     borderRadius: 10,
     paddingHorizontal: 14,
     paddingVertical: 10,
     fontSize: 15,
-    color: '#000',
+    color: COLORS.ink,
   },
   noteInputDisabled: {
-    backgroundColor: '#F2F2F7',
+    backgroundColor: COLORS.grayTrack,
   },
   savingText: {
     fontSize: 12,
-    color: '#8e8e93',
+    color: COLORS.gray,
   },
   saveErrorRow: {
     flexDirection: 'row',
@@ -1588,41 +1654,47 @@ const styles = StyleSheet.create({
   },
   retryButtonText: {
     fontSize: 13,
-    color: '#2f95dc',
+    color: COLORS.accent,
     fontWeight: '600',
   },
   answerLabel: {
     fontSize: 12,
-    color: '#8e8e93',
-    marginTop: 8,
+    fontWeight: '600',
+    color: COLORS.inkSoft,
+    marginTop: 4,
+  },
+  answerBox: {
+    backgroundColor: COLORS.accentSoft,
+    borderRadius: 10,
+    padding: 12,
   },
   answerText: {
     fontSize: 16,
     lineHeight: 24,
-    color: '#000',
+    color: COLORS.ink,
     padding: 0,
     textAlignVertical: 'top',
   },
   fragmentHintText: {
     fontSize: 12,
-    color: '#8e8e93',
+    color: COLORS.gray,
   },
   fragmentSelectionBox: {
     marginTop: 8,
     borderRadius: 10,
-    backgroundColor: '#F2F2F7',
+    backgroundColor: COLORS.warmSoft,
     padding: 12,
     gap: 6,
   },
   fragmentSelectionLabel: {
     fontSize: 11,
     fontWeight: '600',
-    color: '#8e8e93',
+    color: COLORS.warmDark,
   },
   fragmentSelectionPreview: {
     fontSize: 15,
     lineHeight: 20,
-    color: '#000',
+    color: COLORS.ink,
   },
   fragmentActionsRow: {
     flexDirection: 'row',
@@ -1637,13 +1709,13 @@ const styles = StyleSheet.create({
   },
   fragmentCancelButtonText: {
     fontSize: 14,
-    color: '#8e8e93',
+    color: COLORS.gray,
     fontWeight: '600',
   },
   fragmentSaveButton: {
     minHeight: 44,
     borderRadius: 10,
-    backgroundColor: '#2f95dc',
+    backgroundColor: COLORS.ink,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 14,
@@ -1651,7 +1723,7 @@ const styles = StyleSheet.create({
   fragmentSaveButtonText: {
     fontSize: 14,
     fontWeight: '600',
-    color: '#fff',
+    color: COLORS.surface,
   },
   fragmentSaveButtonRow: {
     flexDirection: 'row',
@@ -1660,7 +1732,7 @@ const styles = StyleSheet.create({
   },
   fullyAnsweredNotice: {
     fontSize: 12,
-    color: '#8e8e93',
+    color: COLORS.gray,
     textAlign: 'center',
   },
   dangerZone: {
@@ -1670,12 +1742,17 @@ const styles = StyleSheet.create({
   deleteButton: {
     minHeight: 44,
     borderRadius: 10,
-    backgroundColor: '#d9534f',
+    borderWidth: 1,
+    borderColor: COLORS.danger,
+    backgroundColor: COLORS.dangerSoft,
     alignItems: 'center',
     justifyContent: 'center',
   },
+  deleteButtonDisabledStyle: {
+    opacity: 0.5,
+  },
   deleteButtonText: {
-    color: '#fff',
+    color: COLORS.danger,
     fontSize: 16,
     fontWeight: '600',
   },
