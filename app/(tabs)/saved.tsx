@@ -1,10 +1,25 @@
 import { router, useFocusEffect } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
 import { useCallback, useState } from 'react';
-import { Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { deleteSavedItems, fetchSavedItems } from '@/src/services/savedItemsService';
 import type { SavedItem, SavedItemSourceType, SavedItemType } from '@/src/types/savedItem';
+
+// Same restrained, warm-gray/ink-green iOS-native palette as the Learn page.
+// Scoped to this screen only — no global theme system, no effect on other pages.
+const COLORS = {
+  background: '#F6F3EE',
+  surface: '#FFFFFF',
+  ink: '#1E362F',
+  inkSoft: '#4B6358',
+  accent: '#48715F',
+  accentSoft: '#E4EEE8',
+  gray: '#66666A',
+  grayTrack: '#EDEAE4',
+  border: '#E2DED7',
+  danger: '#B3483F',
+};
 
 type LoadState = 'loading' | 'loaded' | 'error';
 
@@ -183,6 +198,7 @@ export default function SavedScreen() {
 
       {loadState === 'loading' && (
         <View style={styles.centerContent}>
+          <ActivityIndicator color={COLORS.ink} />
           <Text style={styles.statusText}>正在加载生词本…</Text>
         </View>
       )}
@@ -203,6 +219,7 @@ export default function SavedScreen() {
       {loadState === 'loaded' && items.length === 0 && (
         <View style={styles.centerContent}>
           <Text style={styles.statusText}>还没有收藏内容</Text>
+          <Text style={styles.statusSubText}>在学习或面试准备中收藏的内容会显示在这里。</Text>
         </View>
       )}
 
@@ -216,6 +233,7 @@ export default function SavedScreen() {
             ItemSeparatorComponent={() => <View style={styles.separator} />}
             renderItem={({ item }) => {
               const isSelected = selectedIds.has(item.id);
+              const lineLimit = item.itemType === 'sentence' ? 3 : 2;
 
               return (
                 <Pressable
@@ -227,6 +245,11 @@ export default function SavedScreen() {
                       ? `${isSelected ? '取消选择' : '选择'} ${item.content}`
                       : `查看 ${item.content} 详情`
                   }
+                  accessibilityState={
+                    isManaging
+                      ? { selected: isSelected, disabled: isBulkDeleting }
+                      : { disabled: isBulkDeleting }
+                  }
                   style={[styles.row, isBulkDeleting && styles.disabledOpacity]}>
                   {isManaging && (
                     <SymbolView
@@ -235,7 +258,7 @@ export default function SavedScreen() {
                         android: isSelected ? 'check_circle' : 'radio_button_unchecked',
                         web: isSelected ? 'check_circle' : 'radio_button_unchecked',
                       }}
-                      tintColor={isSelected ? '#2f95dc' : '#c7c7cc'}
+                      tintColor={isSelected ? COLORS.ink : COLORS.gray}
                       size={22}
                     />
                   )}
@@ -246,17 +269,21 @@ export default function SavedScreen() {
                         styles.itemContent,
                         item.itemType === 'sentence' && styles.sentenceContent,
                       ]}
-                      numberOfLines={item.itemType === 'sentence' ? 3 : 2}
+                      numberOfLines={lineLimit}
                       ellipsizeMode="tail">
                       {item.content}
                     </Text>
                     {item.chineseText && (
                       <Text style={styles.itemChinese}>{item.chineseText}</Text>
                     )}
-                    <Text style={styles.itemMeta}>
-                      {ITEM_TYPE_LABELS[item.itemType]} · 来源：
-                      {SOURCE_TYPE_LABELS[item.sourceType]}
-                    </Text>
+                    <View style={styles.metaRow}>
+                      <View style={styles.metaTag}>
+                        <Text style={styles.metaTagText}>{ITEM_TYPE_LABELS[item.itemType]}</Text>
+                      </View>
+                      <View style={styles.metaTag}>
+                        <Text style={styles.metaTagText}>{SOURCE_TYPE_LABELS[item.sourceType]}</Text>
+                      </View>
+                    </View>
                   </View>
 
                   {!isManaging && (
@@ -266,7 +293,7 @@ export default function SavedScreen() {
                         android: 'chevron_right',
                         web: 'chevron_right',
                       }}
-                      tintColor="#c7c7cc"
+                      tintColor={COLORS.gray}
                       size={14}
                     />
                   )}
@@ -317,7 +344,7 @@ export default function SavedScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#F2F2F7',
+    backgroundColor: COLORS.background,
     paddingTop: 14,
     paddingHorizontal: 16,
   },
@@ -335,7 +362,7 @@ const styles = StyleSheet.create({
   },
   subtitle: {
     fontSize: 13,
-    color: '#8e8e93',
+    color: COLORS.gray,
   },
   manageButton: {
     minHeight: 44,
@@ -346,29 +373,34 @@ const styles = StyleSheet.create({
   },
   manageButtonText: {
     fontSize: 16,
-    color: '#2f95dc',
+    color: COLORS.ink,
     fontWeight: '600',
   },
   centerContent: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 12,
+    gap: 10,
   },
   statusText: {
     fontSize: 15,
-    color: '#8e8e93',
+    color: COLORS.gray,
+    textAlign: 'center',
+  },
+  statusSubText: {
+    fontSize: 13,
+    color: COLORS.gray,
     textAlign: 'center',
   },
   errorText: {
     fontSize: 13,
-    color: '#d9534f',
+    color: COLORS.danger,
     textAlign: 'center',
   },
   retryButton: {
     minHeight: 44,
     borderRadius: 10,
-    backgroundColor: '#2f95dc',
+    backgroundColor: COLORS.ink,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 16,
@@ -384,21 +416,21 @@ const styles = StyleSheet.create({
   },
   selectAllButtonText: {
     fontSize: 15,
-    color: '#2f95dc',
+    color: COLORS.ink,
     fontWeight: '600',
   },
   selectedCountText: {
     fontSize: 13,
-    color: '#8e8e93',
+    color: COLORS.gray,
   },
   list: {
     flex: 1,
   },
   // Only the actual rows get the white rounded background — since this
   // sizes to content (no flexGrow), it never stretches past the last row,
-  // and any leftover space below stays the page's gray.
+  // and any leftover space below stays the page's warm-gray background.
   listContent: {
-    backgroundColor: '#fff',
+    backgroundColor: COLORS.surface,
     borderRadius: 12,
     overflow: 'hidden',
   },
@@ -409,11 +441,11 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     paddingHorizontal: 16,
     gap: 12,
-    backgroundColor: '#fff',
+    backgroundColor: COLORS.surface,
   },
   separator: {
     height: StyleSheet.hairlineWidth,
-    backgroundColor: '#c6c6c8',
+    backgroundColor: COLORS.border,
     marginLeft: 16,
   },
   rowTextGroup: {
@@ -423,7 +455,7 @@ const styles = StyleSheet.create({
   itemContent: {
     fontSize: 18,
     fontWeight: '600',
-    color: '#000',
+    color: COLORS.ink,
   },
   sentenceContent: {
     fontSize: 16,
@@ -432,19 +464,31 @@ const styles = StyleSheet.create({
   },
   itemChinese: {
     fontSize: 15,
-    color: '#3c3c43',
+    color: COLORS.inkSoft,
   },
-  itemMeta: {
-    fontSize: 12,
-    color: '#8e8e93',
+  metaRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 2,
+  },
+  metaTag: {
+    borderRadius: 6,
+    backgroundColor: COLORS.grayTrack,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  metaTagText: {
+    fontSize: 11,
+    color: COLORS.gray,
   },
   disabledOpacity: {
     opacity: 0.5,
   },
   bulkActionBar: {
-    backgroundColor: '#fff',
+    backgroundColor: COLORS.surface,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: '#c6c6c8',
+    borderTopColor: COLORS.border,
     marginHorizontal: -16,
     paddingHorizontal: 20,
     paddingVertical: 12,
@@ -458,17 +502,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
   },
   bulkDeleteButtonNeutral: {
-    backgroundColor: '#e5e5ea',
+    backgroundColor: COLORS.grayTrack,
   },
   bulkDeleteButtonDestructive: {
-    backgroundColor: '#ff3b30',
+    backgroundColor: COLORS.danger,
   },
   bulkDeleteButtonText: {
     fontSize: 16,
     fontWeight: '600',
   },
   bulkDeleteButtonTextNeutral: {
-    color: '#8e8e93',
+    color: COLORS.gray,
   },
   bulkDeleteButtonTextDestructive: {
     color: '#fff',
