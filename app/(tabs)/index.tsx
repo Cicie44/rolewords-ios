@@ -47,12 +47,12 @@ const COLORS = {
   surface: '#FFFFFF',
   ink: '#1E362F',
   inkSoft: '#4B6358',
-  accent: '#5C8B76',
+  accent: '#48715F',
   accentSoft: '#E4EEE8',
   warm: '#B9814F',
   warmDark: '#8C5C2E',
   warmSoft: '#F5E9DA',
-  gray: '#8A8A8E',
+  gray: '#66666A',
   grayTrack: '#EDEAE4',
   border: '#E2DED7',
   danger: '#B3483F',
@@ -109,7 +109,6 @@ type WordCardProps = {
   progressCurrent: number;
   progressTotal: number;
   progressLabel: string;
-  secondaryInfo?: string;
   onExit: () => void;
   exitDisabled: boolean;
   recognitionCount: number;
@@ -129,7 +128,6 @@ function WordCard({
   progressCurrent,
   progressTotal,
   progressLabel,
-  secondaryInfo,
   onExit,
   exitDisabled,
   recognitionCount,
@@ -151,7 +149,6 @@ function WordCard({
         <View style={styles.cardProgressGroup}>
           <Text style={styles.cardProgressText}>
             {progressLabel} {progressCurrent} / {progressTotal}
-            {secondaryInfo ? ` · ${secondaryInfo}` : ''}
           </Text>
           <ProgressBar ratio={progressRatio} />
         </View>
@@ -231,11 +228,12 @@ function WordCard({
 
       <View style={styles.divider} />
 
-      <View style={styles.recognitionRow}>
+      <View
+        style={styles.recognitionRow}
+        accessible
+        accessibilityLabel={`认识进度 ${recognitionCount} / ${MAX_RECOGNITION_COUNT}`}>
         <Text style={styles.recognitionLabel}>认识进度</Text>
-        <View
-          style={styles.dotsRow}
-          accessibilityLabel={`认识进度 ${recognitionCount} / ${MAX_RECOGNITION_COUNT}`}>
+        <View style={styles.dotsRow}>
           {Array.from({ length: MAX_RECOGNITION_COUNT }).map((_, index) => (
             <View key={index} style={[styles.dot, index < recognitionCount && styles.dotFilled]} />
           ))}
@@ -986,13 +984,12 @@ export default function LearnScreen() {
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      <View style={styles.header}>
-        <Text style={styles.brand}>RoleWords</Text>
-        <Text style={styles.heroTitle}>今天继续学一点</Text>
-        <Text style={styles.heroSubtitle}>
-          每组新词最多 {LEARN_TARGET_COMPLETED} 个，认识满 {MAX_RECOGNITION_COUNT} 次即掌握；巩固词与到期复习词会公平穿插出现。
-        </Text>
-      </View>
+      {screenMode === 'panel' && (
+        <View style={styles.header}>
+          <Text style={styles.brand}>RoleWords</Text>
+          <Text style={styles.heroTitle}>今天继续学一点</Text>
+        </View>
+      )}
 
       {wordBooksLoadState === 'loading' && (
         <View style={styles.stateCard}>
@@ -1112,21 +1109,7 @@ export default function LearnScreen() {
             <Text style={styles.sessionCardTitle}>本次学习</Text>
 
             <View style={styles.sessionBlock}>
-              <View style={styles.sessionBlockHeaderRow}>
-                <Text style={styles.sessionBlockTitle}>Learn 新词与巩固</Text>
-                <Text style={styles.sessionBlockTarget}>目标 {LEARN_TARGET_COMPLETED} 个</Text>
-              </View>
-
-              <View style={styles.statChipsRow}>
-                <View style={styles.statChip}>
-                  <Text style={styles.statChipValue}>{newWordIds.length}</Text>
-                  <Text style={styles.statChipLabel}>待学新词</Text>
-                </View>
-                <View style={styles.statChip}>
-                  <Text style={styles.statChipValue}>{carryoverWordIds.length}</Text>
-                  <Text style={styles.statChipLabel}>待继续巩固</Text>
-                </View>
-              </View>
+              <Text style={styles.sessionBlockTitle}>Learn 新词与巩固</Text>
 
               {wordsInBook.length === 0 ? (
                 <Text style={styles.sessionBlockEmpty}>该词书暂无词条数据，请稍后重试。</Text>
@@ -1153,10 +1136,7 @@ export default function LearnScreen() {
             <View style={styles.sessionDivider} />
 
             <View style={styles.sessionBlock}>
-              <View style={styles.sessionBlockHeaderRow}>
-                <Text style={styles.sessionBlockTitle}>Review 复习</Text>
-                <Text style={styles.sessionBlockTarget}>每组上限 {REVIEW_GROUP_SIZE}</Text>
-              </View>
+              <Text style={styles.sessionBlockTitle}>Review 复习</Text>
 
               {dueWordIds.length > 0 ? (
                 <View style={styles.statChipsRow}>
@@ -1206,7 +1186,6 @@ export default function LearnScreen() {
             progressCurrent={learnSession.completedWordIds.length}
             progressTotal={LEARN_TARGET_COMPLETED}
             progressLabel="完成"
-            secondaryInfo={`本组已见 ${learnSession.seenWordIds.length} 个词`}
             onExit={handleReturnToPanel}
             exitDisabled={isSaving}
             recognitionCount={progressByItemId[currentWord.id]?.recognitionCount ?? 0}
@@ -1246,76 +1225,26 @@ export default function LearnScreen() {
             ratio={LEARN_TARGET_COMPLETED > 0 ? learnSession.completedWordIds.length / LEARN_TARGET_COMPLETED : 0}
           />
 
-          <View style={styles.statGrid}>
-            <View style={styles.statGridItem}>
-              <Text style={styles.statGridValue}>{learnSession.seenWordIds.length}</Text>
-              <Text style={styles.statGridLabel}>见过词数</Text>
-            </View>
-            <View style={styles.statGridItem}>
-              <Text style={styles.statGridValue}>{learnSession.totalPresentationCount}</Text>
-              <Text style={styles.statGridLabel}>卡片展示次数</Text>
-            </View>
-            <View style={styles.statGridItem}>
-              <Text style={styles.statGridValue}>{learnSession.graduatedWordIds.length}</Text>
-              <Text style={styles.statGridLabel}>转入 Review</Text>
-            </View>
-            <View style={styles.statGridItem}>
-              <Text style={styles.statGridValue}>{learnSession.unknownCount}</Text>
-              <Text style={styles.statGridLabel}>不认识</Text>
-            </View>
-            <View style={styles.statGridItem}>
-              <Text style={styles.statGridValue}>{learnSession.fuzzyCount}</Text>
-              <Text style={styles.statGridLabel}>模糊</Text>
-            </View>
-            <View style={styles.statGridItem}>
-              <Text style={styles.statGridValue}>{learnSession.knownCount}</Text>
-              <Text style={styles.statGridLabel}>认识</Text>
-            </View>
-          </View>
-
           <Text style={styles.sectionLabel}>本组完成词</Text>
-          <View style={styles.chipWrapRow}>
-            {learnSession.completedWordIds.length > 0 ? (
-              learnSession.completedWordIds.map((id) => (
-                <View key={id} style={styles.termChip}>
-                  <Text style={styles.termChipText}>{vocabularyById.get(id)?.term ?? id}</Text>
-                </View>
-              ))
-            ) : (
-              <Text style={styles.summaryNote}>暂无</Text>
-            )}
-          </View>
-
-          <Text style={styles.sectionLabel}>下组继续巩固</Text>
-          <View style={styles.chipWrapRow}>
-            {learnSession.carryoverWordIds.length > 0 ? (
-              learnSession.carryoverWordIds.map((id) => (
-                <View key={id} style={styles.termChip}>
-                  <Text style={styles.termChipText}>{vocabularyById.get(id)?.term ?? id}</Text>
-                </View>
-              ))
-            ) : (
-              <Text style={styles.summaryNote}>暂无</Text>
-            )}
-          </View>
-
-          <Text style={styles.sectionLabel}>转入 Review 的困难词</Text>
-          <View style={styles.chipWrapRow}>
-            {learnSession.graduatedWordIds.length > 0 ? (
-              learnSession.graduatedWordIds.map((id) => (
-                <View key={id} style={styles.termChipWarm}>
-                  <Text style={styles.termChipWarmText}>{vocabularyById.get(id)?.term ?? id}</Text>
-                </View>
-              ))
-            ) : (
-              <Text style={styles.summaryNote}>暂无</Text>
-            )}
-          </View>
-
-          <View style={styles.summaryStatsFooterRow}>
-            <Text style={styles.summaryFooterText}>当前词书剩余新词数量：{newWordIds.length}</Text>
-            <Text style={styles.summaryFooterText}>当前待继续巩固数量：{carryoverWordIds.length}</Text>
-          </View>
+          {learnSession.completedWordIds.length > 0 ? (
+            <View style={styles.completedList}>
+              {learnSession.completedWordIds.map((id, index) => {
+                const item = vocabularyById.get(id);
+                return (
+                  <View
+                    key={id}
+                    style={[styles.completedRow, index > 0 && styles.completedRowDivider]}>
+                    <Text style={styles.completedTerm}>{item?.term ?? id}</Text>
+                    {item?.chineseMeaning && (
+                      <Text style={styles.completedMeaning}>{item.chineseMeaning}</Text>
+                    )}
+                  </View>
+                );
+              })}
+            </View>
+          ) : (
+            <Text style={styles.summaryNote}>暂无</Text>
+          )}
 
           <Pressable
             onPress={handleReturnToPanel}
@@ -1382,21 +1311,25 @@ export default function LearnScreen() {
           />
 
           <View style={styles.statGrid}>
-            <View style={styles.statGridItem}>
-              <Text style={styles.statGridValue}>{reviewSession.unknownCount}</Text>
-              <Text style={styles.statGridLabel}>不认识</Text>
+            <View style={styles.statGridRow}>
+              <View style={styles.statGridItem}>
+                <Text style={styles.statGridValue}>{reviewSession.unknownCount}</Text>
+                <Text style={styles.statGridLabel}>不认识</Text>
+              </View>
+              <View style={styles.statGridItem}>
+                <Text style={styles.statGridValue}>{reviewSession.fuzzyCount}</Text>
+                <Text style={styles.statGridLabel}>模糊</Text>
+              </View>
             </View>
-            <View style={styles.statGridItem}>
-              <Text style={styles.statGridValue}>{reviewSession.fuzzyCount}</Text>
-              <Text style={styles.statGridLabel}>模糊</Text>
-            </View>
-            <View style={styles.statGridItem}>
-              <Text style={styles.statGridValue}>{reviewSession.knownCount}</Text>
-              <Text style={styles.statGridLabel}>认识</Text>
-            </View>
-            <View style={styles.statGridItem}>
-              <Text style={styles.statGridValue}>{dueWordIds.length}</Text>
-              <Text style={styles.statGridLabel}>仍然到期</Text>
+            <View style={styles.statGridRow}>
+              <View style={styles.statGridItem}>
+                <Text style={styles.statGridValue}>{reviewSession.knownCount}</Text>
+                <Text style={styles.statGridLabel}>认识</Text>
+              </View>
+              <View style={styles.statGridItem}>
+                <Text style={styles.statGridValue}>{dueWordIds.length}</Text>
+                <Text style={styles.statGridLabel}>仍然到期</Text>
+              </View>
             </View>
           </View>
 
@@ -1447,12 +1380,6 @@ const styles = StyleSheet.create({
     fontSize: 26,
     fontWeight: '700',
     color: COLORS.ink,
-  },
-  heroSubtitle: {
-    fontSize: 13,
-    lineHeight: 19,
-    color: COLORS.gray,
-    marginTop: 2,
   },
   disabledOpacity: {
     opacity: 0.5,
@@ -1578,19 +1505,10 @@ const styles = StyleSheet.create({
   sessionBlock: {
     gap: 8,
   },
-  sessionBlockHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
   sessionBlockTitle: {
     fontSize: 14,
     fontWeight: '600',
     color: COLORS.ink,
-  },
-  sessionBlockTarget: {
-    fontSize: 12,
-    color: COLORS.gray,
   },
   sessionBlockEmpty: {
     fontSize: 13,
@@ -1925,13 +1843,14 @@ const styles = StyleSheet.create({
     marginLeft: 4,
   },
   statGrid: {
+    gap: 8,
+  },
+  statGridRow: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
     gap: 8,
   },
   statGridItem: {
-    minWidth: '30%',
-    flexGrow: 1,
+    flex: 1,
     borderRadius: 10,
     backgroundColor: COLORS.grayTrack,
     paddingVertical: 10,
@@ -1953,39 +1872,28 @@ const styles = StyleSheet.create({
     color: COLORS.gray,
     marginTop: 4,
   },
-  chipWrapRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
+  completedList: {
+    width: '100%',
+    borderRadius: 12,
+    backgroundColor: COLORS.grayTrack,
+    overflow: 'hidden',
   },
-  termChip: {
-    borderRadius: 8,
-    backgroundColor: COLORS.accentSoft,
-    paddingVertical: 5,
-    paddingHorizontal: 10,
-  },
-  termChipText: {
-    fontSize: 13,
-    color: COLORS.ink,
-    fontWeight: '600',
-  },
-  termChipWarm: {
-    borderRadius: 8,
-    backgroundColor: COLORS.warmSoft,
-    paddingVertical: 5,
-    paddingHorizontal: 10,
-  },
-  termChipWarmText: {
-    fontSize: 13,
-    color: COLORS.warmDark,
-    fontWeight: '600',
-  },
-  summaryStatsFooterRow: {
+  completedRow: {
+    paddingVertical: 10,
+    paddingHorizontal: 12,
     gap: 2,
-    marginTop: 4,
   },
-  summaryFooterText: {
-    fontSize: 12,
+  completedRowDivider: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.border,
+  },
+  completedTerm: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: COLORS.ink,
+  },
+  completedMeaning: {
+    fontSize: 13,
     color: COLORS.gray,
   },
 });
