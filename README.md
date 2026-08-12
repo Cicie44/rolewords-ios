@@ -12,13 +12,30 @@ An iOS vocabulary and interview-preparation app for Chinese-speaking IT job seek
 
 **Status:** v0.1 in active development · iOS first
 
-<!--
-Add 3–4 portrait screenshots here when ready:
-1. Learn control panel
-2. Vocabulary card
-3. Interview question/answer flow
-4. Saved items
--->
+## Product preview
+
+<table>
+  <tr>
+    <th>Learning dashboard</th>
+    <th>Vocabulary card</th>
+    <th>Session summary</th>
+  </tr>
+  <tr>
+    <td><img src="https://github.com/user-attachments/assets/9f29f7de-c4a8-4dff-afe4-39ef5faa098e" alt="RoleWords learning dashboard" width="260" /></td>
+    <td><img src="https://github.com/user-attachments/assets/e7f0ff6a-869f-495f-8a64-5b2a257581c6" alt="RoleWords vocabulary learning card" width="260" /></td>
+    <td><img src="https://github.com/user-attachments/assets/73aae56e-ad7e-4cf0-bcb8-b1af35097317" alt="RoleWords learning session summary" width="260" /></td>
+  </tr>
+  <tr>
+    <th>Interview history</th>
+    <th>AI reference answers</th>
+    <th>Saved knowledge</th>
+  </tr>
+  <tr>
+    <td><img src="https://github.com/user-attachments/assets/620dbe9c-78fd-4ab0-a015-f71076c7b58e" alt="RoleWords interview history" width="260" /></td>
+    <td><img src="https://github.com/user-attachments/assets/28039773-6f9a-4788-89c9-4644c5025707" alt="RoleWords AI-generated reference answer" width="260" /></td>
+    <td><img src="https://github.com/user-attachments/assets/d1da2a96-cf4c-49f3-aeb9-fa3c08eb7ab0" alt="RoleWords saved knowledge list" width="260" /></td>
+  </tr>
+</table>
 
 ## Why RoleWords
 
@@ -33,12 +50,11 @@ RoleWords connects those two needs:
 
 ## Product highlights
 
-- **1,500 curated learning items** across Developer, Project Manager, and AI Research word books.
-- **Purpose-built learning engine** with rolling groups, fair reinforcement, fatigue caps, recognition streaks, and timed review scheduling.
+- **Test-backed learning engine** with rolling groups, fair reinforcement, cross-session carryover, fatigue caps, recognition streaks, and adaptive review scheduling.
 - **Personalised interview preparation** that uses a CV, job title, company, optional job description, and the user's own talking points.
 - **AI-generated question and answer sets** with validated structure instead of unstructured model output.
+- **Cohesive iOS-native interface** across learning, saved content, interview preparation, authentication, and navigation.
 - **Private, user-scoped data** using Supabase Auth, Postgres Row Level Security, private Storage, and authenticated Edge Functions.
-- **Native iOS-focused experience** built with Expo Router, React Native, TypeScript, and system text-to-speech.
 
 ## Core experiences
 
@@ -87,7 +103,8 @@ Users can:
 5. add personal experience and talking points to each question;
 6. generate 10 natural English reference answers;
 7. save useful questions, words, phrases, or sentences for later study;
-8. return to previous sessions through interview history.
+8. return to previous sessions through interview history;
+9. delete a session and its associated private CV when it is no longer needed.
 
 Generated question sets are validated at runtime and must contain exactly:
 
@@ -110,6 +127,7 @@ CVs and interview content are sensitive, so the implementation keeps trust bound
 - user progress, saved items, interview sessions, and questions are protected by Row Level Security;
 - CV PDFs are stored in a private `interview-cvs` bucket under a path derived from the authenticated user and session ID;
 - CV uploads are restricted to PDF and capped at 10 MB;
+- deleting an interview session removes its associated private CV before deleting the session record and is safe to retry;
 - AI requests run in authenticated Supabase Edge Functions;
 - AI credentials never ship in the React Native client;
 - Edge Functions use the caller's RLS-scoped Supabase client rather than a service-role client for user data;
@@ -202,9 +220,10 @@ npm run start
 ```bash
 npm run typecheck
 npm run validate:vocabulary
+npm run test:learning
 ```
 
-The vocabulary validator checks the word-book datasets without adding another runtime dependency.
+The vocabulary validator checks the word-book datasets without adding another runtime dependency. The learning test suite covers fair scheduling, cross-session carryover, presentation caps, and adaptive review intervals.
 
 ## Product decisions
 
@@ -216,7 +235,7 @@ The vocabulary validator checks the word-book datasets without adding another ru
 
 ## Current scope
 
-RoleWords v0.1 includes vocabulary learning, review scheduling, saved items, authentication, CV upload, AI-generated interview questions and answers, and interview history.
+RoleWords v0.1 includes vocabulary learning, review scheduling, saved items, authentication, CV upload, AI-generated interview questions and answers, interview history, and secure session deletion.
 
 Speaking assessment, real-time voice interviews, social features, payments, Android, and web are deliberately outside the first release.
 
