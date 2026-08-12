@@ -133,6 +133,156 @@ export type Database = {
         }
         Relationships: []
       }
+      user_generated_vocabulary_items: {
+        Row: {
+          batch_id: string
+          chinese_meaning: string
+          created_at: string
+          english_definition: string | null
+          example_sentence: string | null
+          example_translation: string | null
+          id: string
+          ipa: string | null
+          is_active: boolean
+          part_of_speech: string | null
+          position_in_batch: number
+          pronunciation_text: string | null
+          tags: string[]
+          term: string
+          updated_at: string
+          user_id: string
+          word_book_id: string
+        }
+        Insert: {
+          batch_id: string
+          chinese_meaning: string
+          created_at?: string
+          english_definition?: string | null
+          example_sentence?: string | null
+          example_translation?: string | null
+          id?: string
+          ipa?: string | null
+          is_active?: boolean
+          part_of_speech?: string | null
+          position_in_batch: number
+          pronunciation_text?: string | null
+          tags?: string[]
+          term: string
+          updated_at?: string
+          user_id: string
+          word_book_id: string
+        }
+        Update: {
+          batch_id?: string
+          chinese_meaning?: string
+          created_at?: string
+          english_definition?: string | null
+          example_sentence?: string | null
+          example_translation?: string | null
+          id?: string
+          ipa?: string | null
+          is_active?: boolean
+          part_of_speech?: string | null
+          position_in_batch?: number
+          pronunciation_text?: string | null
+          tags?: string[]
+          term?: string
+          updated_at?: string
+          user_id?: string
+          word_book_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "user_generated_vocabulary_items_batch_fkey"
+            columns: ["batch_id", "user_id", "word_book_id"]
+            isOneToOne: false
+            referencedRelation: "user_vocabulary_generation_batches"
+            referencedColumns: ["id", "user_id", "word_book_id"]
+          },
+        ]
+      }
+      user_vocabulary_expansion_settings: {
+        Row: {
+          created_at: string
+          is_enabled: boolean
+          updated_at: string
+          user_id: string
+          word_book_id: string
+        }
+        Insert: {
+          created_at?: string
+          is_enabled?: boolean
+          updated_at?: string
+          user_id?: string
+          word_book_id: string
+        }
+        Update: {
+          created_at?: string
+          is_enabled?: boolean
+          updated_at?: string
+          user_id?: string
+          word_book_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "user_vocabulary_expansion_settings_word_book_id_fkey"
+            columns: ["word_book_id"]
+            isOneToOne: false
+            referencedRelation: "word_books"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      user_vocabulary_generation_batches: {
+        Row: {
+          completed_at: string | null
+          created_at: string
+          failure_code: string | null
+          generated_count: number
+          generation_day: string
+          id: string
+          requested_count: number
+          status: string
+          updated_at: string
+          user_id: string
+          word_book_id: string
+        }
+        Insert: {
+          completed_at?: string | null
+          created_at?: string
+          failure_code?: string | null
+          generated_count?: number
+          generation_day?: string
+          id?: string
+          requested_count?: number
+          status?: string
+          updated_at?: string
+          user_id: string
+          word_book_id: string
+        }
+        Update: {
+          completed_at?: string | null
+          created_at?: string
+          failure_code?: string | null
+          generated_count?: number
+          generation_day?: string
+          id?: string
+          requested_count?: number
+          status?: string
+          updated_at?: string
+          user_id?: string
+          word_book_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "user_vocabulary_generation_batches_word_book_id_fkey"
+            columns: ["word_book_id"]
+            isOneToOne: false
+            referencedRelation: "word_books"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       user_word_progress: {
         Row: {
           created_at: string

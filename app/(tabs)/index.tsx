@@ -1,7 +1,7 @@
 import { useFocusEffect } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import {
   LEARN_TARGET_COMPLETED,
@@ -34,7 +34,14 @@ import {
   fetchWordProgress,
   saveWordProgress,
 } from '@/src/services/wordProgressService';
-import { fetchVocabularyByWordBookId, fetchWordBooks } from '@/src/services/vocabularyService';
+import {
+  fetchGeneratedVocabularyByWordBookId,
+  fetchVocabularyByWordBookId,
+  fetchVocabularyExpansionSetting,
+  fetchWordBooks,
+  requestVocabularyExpansion,
+  setVocabularyExpansionEnabled,
+} from '@/src/services/vocabularyService';
 import type { SavedItem, SavedItemType } from '@/src/types/savedItem';
 import type { Familiarity, UserWordProgress, VocabularyItem, WordBook } from '@/src/types/vocabulary';
 import type { LearnSession, ReviewSession, ScreenMode } from '@/src/types/learningSession';
@@ -63,6 +70,11 @@ const CHOICES: { familiarity: Familiarity; label: string }[] = [
   { familiarity: 'fuzzy', label: '模糊' },
   { familiarity: 'known', label: '认识' },
 ];
+
+// How long to wait, once, after a generation_in_progress response before
+// quietly re-checking — never a repeating interval, and never more than one
+// scheduled recheck at a time (see scheduleExpansionRecheck).
+const EXPANSION_RECHECK_DELAY_MS = 20000;
 
 type LoadState = 'loading' | 'loaded' | 'error';
 
@@ -106,6 +118,7 @@ function ProgressBar({ ratio, tone = 'accent' }: { ratio: number; tone?: 'accent
 
 type WordCardProps = {
   word: VocabularyItem;
+  isGenerated: boolean;
   progressCurrent: number;
   progressTotal: number;
   progressLabel: string;
@@ -125,6 +138,7 @@ type WordCardProps = {
 
 function WordCard({
   word,
+  isGenerated,
   progressCurrent,
   progressTotal,
   progressLabel,
@@ -189,6 +203,12 @@ function WordCard({
           )}
         </Pressable>
       </View>
+
+      {isGenerated && (
+        <View style={styles.generatedBadge}>
+          <Text style={styles.generatedBadgeText}>AI 扩展</Text>
+        </View>
+      )}
 
       <View style={styles.pronunciationRow}>
         {word.ipa && (
@@ -318,24 +338,176 @@ export default function LearnScreen() {
 
   const [selectedWordBookId, setSelectedWordBookId] = useState<string | null>(null);
 
-  const [wordsInBook, setWordsInBook] = useState<VocabularyItem[]>([]);
+  // The public 500-word base catalog for the selected book — the "base
+  // word library" the whole app's progress percentage and completion rules
+  // are anchored to. Kept separate from the user's private AI-generated
+  // words (below) so the two can be loaded, and reasoned about, independently.
+  const [baseVocabularyItems, setBaseVocabularyItems] = useState<VocabularyItem[]>([]);
   const [vocabularyLoadState, setVocabularyLoadState] = useState<LoadState>('loading');
   const [vocabularyRetryToken, setVocabularyRetryToken] = useState(0);
-  // Which word book id wordsInBook / vocabularyLoadState's current
+  // Which word book id baseVocabularyItems / vocabularyLoadState's current
   // outcome actually belongs to. Effects fire asynchronously after a state
   // change commits, so there is a real render frame where
   // selectedWordBookId has already changed but the vocabulary-fetch effect
   // hasn't run yet — without these, that frame would render the *previous*
-  // book's title/counts/buttons alongside wordsInBook still holding the
-  // previous book's items. Every place that reads wordsInBook for
-  // rendering must go through vocabularyLoadedForSelectedBook (folded into
-  // dataReady) instead of trusting vocabularyLoadState alone.
+  // book's title/counts/buttons alongside baseVocabularyItems still holding
+  // the previous book's items. Every place that reads baseVocabularyItems
+  // for rendering must go through vocabularyLoadedForSelectedBook (folded
+  // into dataReady) instead of trusting vocabularyLoadState alone.
   const [loadedVocabularyWordBookId, setLoadedVocabularyWordBookId] = useState<string | null>(null);
   const [vocabularyErrorWordBookId, setVocabularyErrorWordBookId] = useState<string | null>(null);
   // Guards against a slow, now-superseded fetch for a previously selected
   // word book overwriting the vocabulary of the word book the user has
   // since switched to.
   const vocabularyRequestTokenRef = useRef(0);
+
+  // The current user's own private AI-generated words for the selected
+  // book. Mirrors baseVocabularyItems' loading shape, but with one
+  // deliberate difference: loadedGeneratedVocabularyWordBookId (the "do we
+  // hold a trustworthy cache" marker) is only ever set by a *successful*
+  // load and is never cleared by a subsequent failed refresh — see
+  // generatedVocabularyAvailableForSelectedBook below, which is what
+  // actually gates merging into wordsInBook. generatedVocabularyLoadState
+  // separately tracks whether the most recent attempt is loading/loaded/
+  // errored, purely for displaying a spinner or a retry affordance.
+  // Returning 0 generated items is a perfectly normal, expected state
+  // (unlike an empty base catalog, which is a data error).
+  const [generatedVocabularyItems, setGeneratedVocabularyItems] = useState<VocabularyItem[]>([]);
+  const [generatedVocabularyLoadState, setGeneratedVocabularyLoadState] = useState<LoadState>('loading');
+  const [generatedVocabularyRetryToken, setGeneratedVocabularyRetryToken] = useState(0);
+  const [loadedGeneratedVocabularyWordBookId, setLoadedGeneratedVocabularyWordBookId] = useState<string | null>(
+    null,
+  );
+  // Paired with loadedGeneratedVocabularyWordBookId above: a trustworthy
+  // cache belongs to one exact (userId, wordBookId) pair, never a
+  // wordBookId alone — otherwise switching accounts while staying on the
+  // same word book would keep reporting the previous account's cache as
+  // available for the one render frame before the account-change effect
+  // runs. Only ever set together with the wordBookId marker, on success.
+  const [loadedGeneratedVocabularyUserId, setLoadedGeneratedVocabularyUserId] = useState<string | null>(null);
+  const [generatedVocabularyErrorWordBookId, setGeneratedVocabularyErrorWordBookId] = useState<string | null>(null);
+  const generatedVocabularyRequestTokenRef = useRef(0);
+
+  // Whether the signed-in user has opted the selected book into AI daily
+  // vocabulary expansion. Same cache-vs-attempt-status split as the
+  // generated vocabulary above: loadedExpansionSettingWordBookId is only
+  // ever set on success and never cleared by a failed refresh, so a stale
+  // but trustworthy on/off state can still be shown (with an error+retry)
+  // while a refresh is failing.
+  const [expansionSettingEnabled, setExpansionSettingEnabled] = useState(false);
+  const [expansionSettingLoadState, setExpansionSettingLoadState] = useState<LoadState>('loading');
+  const [expansionSettingRetryToken, setExpansionSettingRetryToken] = useState(0);
+  const [loadedExpansionSettingWordBookId, setLoadedExpansionSettingWordBookId] = useState<string | null>(null);
+  // Same (userId, wordBookId) pairing as loadedGeneratedVocabularyUserId
+  // above, for the same reason.
+  const [loadedExpansionSettingUserId, setLoadedExpansionSettingUserId] = useState<string | null>(null);
+  const [expansionSettingErrorWordBookId, setExpansionSettingErrorWordBookId] = useState<string | null>(null);
+  const expansionSettingRequestTokenRef = useRef(0);
+
+  // Saving the on/off toggle itself (distinct from isRequestingExpansion,
+  // which tracks the generation call that immediately follows turning it on).
+  const [isExpansionSettingSaving, setIsExpansionSettingSaving] = useState(false);
+  const [expansionToggleError, setExpansionToggleError] = useState<string | null>(null);
+  // Owner of the in-flight setting save — mirrors expansionInFlightRef's
+  // ownership pattern below. isExpansionSettingSaving is a single shared
+  // boolean (not itself scoped per account/book), so without this a save
+  // that started for one account/book, finishing after the account-change
+  // reset effect already let a *new* save start for a different
+  // account/book, could clear isExpansionSettingSaving out from under that
+  // new, still-in-flight save — surfacing it as "done" early and allowing a
+  // duplicate submit while it's genuinely still saving.
+  //
+  // operationId gives every save call its own unique identity, distinct
+  // from (userId, wordBookId): if the same user signs out and back in and
+  // saves the setting again for the same word book, the old (still
+  // in-flight) call and the new call share an identical userId/wordBookId
+  // pair, so comparing only those two fields can't tell them apart — the
+  // old call finishing would match the new call's ownership by coincidence
+  // and incorrectly clear it. handleEnableExpansion/handlePauseExpansion
+  // compare operationId (from expansionSettingSaveOperationIdRef, unique
+  // per call), not userId/wordBookId, when deciding whether they still own
+  // this slot.
+  const expansionSettingSaveOwnerRef = useRef<{
+    userId: string;
+    wordBookId: string;
+    operationId: number;
+  } | null>(null);
+  const expansionSettingSaveOperationIdRef = useRef(0);
+
+  // Generation-request state. isRequestingExpansion is deliberately not
+  // scoped to a particular word book by itself — combined at render time
+  // with expansionInFlightRef (see isGeneratingSelectedExpansion below) so
+  // switching away from, and back to, a book/user with a request genuinely
+  // still in flight reports the right thing either way.
+  const [isRequestingExpansion, setIsRequestingExpansion] = useState(false);
+  const [isExpansionInProgress, setIsExpansionInProgress] = useState(false);
+  const [isExpansionBacklogRemaining, setIsExpansionBacklogRemaining] = useState(false);
+  const [expansionGenerationError, setExpansionGenerationError] = useState<string | null>(null);
+
+  // Session-only "not right now" dismissal for the not-yet-enabled AI
+  // expansion card — never persisted, and reset on every word-book switch
+  // (see handleSelectWordBook) so it never silently follows the user to a
+  // different book.
+  const [dismissedExpansionCard, setDismissedExpansionCard] = useState(false);
+
+  // At most one expansion request in flight at a time, globally — tracked
+  // by userId and wordBookId (not wordBookId alone), since a stale request
+  // from an account the user has since signed out of must never be mistaken
+  // for "this word book is busy" once a different account selects the same
+  // book. A ref (not state) because starting one must synchronously block a
+  // concurrent duplicate.
+  //
+  // requestToken additionally gives every *call* its own unique identity,
+  // distinct from (userId, wordBookId): if the same user signs out and back
+  // in and starts a new request for the same word book, the old (still
+  // in-flight) call and the new call share an identical userId/wordBookId
+  // pair, so comparing only those two fields can't tell them apart — the
+  // old call's completion would match the new call's ownership by pure
+  // coincidence and incorrectly clear it. requestToken (from
+  // expansionRequestTokenRef, already unique per call) is what runExpansionRequest's
+  // finally block actually compares against to decide whether it still owns
+  // this slot.
+  const expansionInFlightRef = useRef<{ userId: string; wordBookId: string; requestToken: number } | null>(null);
+  // Invalidates a stale request's result the moment a newer one starts, the
+  // same technique vocabularyRequestTokenRef uses above.
+  const expansionRequestTokenRef = useRef(0);
+  // Records "already auto-attempted userId:wordBookId:UTC-date" so the
+  // focus-driven effect below can never auto-fire the same day/user/book
+  // combination twice, no matter how many times it re-evaluates. Keys embed
+  // userId, so a different signed-in user's keys are already inert for the
+  // new user — the user-change effect below additionally prunes old users'
+  // entries so this Set doesn't grow forever across sign-outs.
+  const autoExpansionAttemptedKeysRef = useRef<Set<string>>(new Set());
+  // At most one pending delayed recheck after a generation_in_progress
+  // response — never a repeating interval, and (per runExpansionRequest's
+  // source parameter) a recheck itself is never allowed to schedule another.
+  const expansionRecheckTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Lets async callbacks (the expansion request, the recheck timer, the
+  // setting/vocabulary fetch effects) read the *current* user/selection/
+  // screen/app-state instead of the value closed over when they started.
+  const currentUserIdRef = useRef<string | null>(authSession?.user.id ?? null);
+  const selectedWordBookIdRef = useRef<string | null>(selectedWordBookId);
+  const screenModeRef = useRef<ScreenMode>('panel');
+  const expansionSettingEnabledRef = useRef(false);
+
+  // Mirrors React Navigation's screen-focus notion is not the same as the
+  // OS-level app lifecycle — this tracks the latter (via React Native's
+  // built-in AppState, no new dependency) so a request never fires while
+  // the app itself is backgrounded, and a pending recheck timer gets
+  // cancelled the moment it is.
+  const [isAppActive, setIsAppActive] = useState(() => AppState.currentState === 'active');
+  const isAppActiveRef = useRef(isAppActive);
+
+  // Cancels a pending one-shot generation_in_progress recheck. Called from
+  // every place that should invalidate it: pausing, switching word books,
+  // an account change, leaving the panel screen, the app leaving the active
+  // state, and unmount.
+  const cancelExpansionRecheck = useCallback(() => {
+    if (expansionRecheckTimeoutRef.current !== null) {
+      clearTimeout(expansionRecheckTimeoutRef.current);
+      expansionRecheckTimeoutRef.current = null;
+    }
+  }, []);
 
   const [progressByItemId, setProgressByItemId] = useState<Record<string, UserWordProgress>>({});
   const [loadState, setLoadState] = useState<LoadState>('loading');
@@ -354,6 +526,58 @@ export default function LearnScreen() {
   const [screenMode, setScreenMode] = useState<ScreenMode>('panel');
   const [learnSession, setLearnSession] = useState<LearnSession | null>(null);
   const [reviewSession, setReviewSession] = useState<ReviewSession | null>(null);
+
+  useEffect(() => {
+    selectedWordBookIdRef.current = selectedWordBookId;
+  }, [selectedWordBookId]);
+  useEffect(() => {
+    screenModeRef.current = screenMode;
+    // Leaving the panel (entering an active Learn/Review session) must
+    // never leave a delayed recheck timer that could fire mid-session.
+    if (screenMode !== 'panel') {
+      cancelExpansionRecheck();
+    }
+  }, [screenMode, cancelExpansionRecheck]);
+  useEffect(() => {
+    expansionSettingEnabledRef.current = expansionSettingEnabled;
+  }, [expansionSettingEnabled]);
+  // Redundant with the AppState listener below on every path that matters —
+  // that listener now updates isAppActiveRef and cancels the recheck timer
+  // synchronously, inside its own callback, before ever calling
+  // setIsAppActive. This effect stays only as a backstop that keeps the ref
+  // consistent with the state on any render path that isn't the listener
+  // itself (e.g. the ref's own initial value), and is otherwise a no-op by
+  // the time it runs.
+  useEffect(() => {
+    isAppActiveRef.current = isAppActive;
+    if (!isAppActive) {
+      cancelExpansionRecheck();
+    }
+  }, [isAppActive, cancelExpansionRecheck]);
+
+  // React Native's built-in AppState — no new dependency. The listener
+  // callback fires synchronously (outside React's render/commit cycle), so
+  // isAppActiveRef and cancelExpansionRecheck() are applied *inside* it,
+  // immediately, before setIsAppActive ever runs. Doing this the other way
+  // around — relying solely on the isAppActive-driven effect above — would
+  // leave a real gap between the OS actually backgrounding the app and
+  // React committing the resulting re-render: during that gap
+  // isAppActiveRef.current would still read stale-true, so a recheck timer
+  // firing (or a manual button handler invoked) in that window could still
+  // go through as if the app were active.
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      const active = nextState === 'active';
+      isAppActiveRef.current = active;
+      if (!active) {
+        cancelExpansionRecheck();
+      }
+      setIsAppActive(active);
+    });
+    return () => {
+      subscription.remove();
+    };
+  }, [cancelExpansionRecheck]);
 
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -376,11 +600,6 @@ export default function LearnScreen() {
 
   const selectedWordBook = wordBooksState.find((book) => book.id === selectedWordBookId);
 
-  // Only ever covers the currently selected book's vocabulary — Learn and
-  // Review sessions never reference a word from any other book, so this
-  // never needs to be a global, all-books lookup.
-  const vocabularyById = useMemo(() => new Map(wordsInBook.map((item) => [item.id, item])), [wordsInBook]);
-
   // "Loaded" and "errored" are only trusted when they're tagged to the
   // currently selected book — see the comment on loadedVocabularyWordBookId
   // above. A stale 'loaded'/'error' left over from the previously selected
@@ -402,9 +621,60 @@ export default function LearnScreen() {
     !vocabularyLoadedForSelectedBook &&
     !vocabularyErrorForSelectedBook;
 
+  // Two deliberately separate concepts for the user's private generated
+  // words:
+  // - generatedVocabularyAvailableForSelectedBook: do we currently hold a
+  //   *trustworthy cache* for the selected book, for the *currently signed-
+  //   in user*. Only ever set true by a successful load (both
+  //   loadedGeneratedVocabularyWordBookId and loadedGeneratedVocabularyUserId
+  //   are never reset by a failed refresh — see the fetch effect above), so
+  //   this stays true through a refresh's 'loading' or 'error' state and
+  //   only ever goes false by switching to a book or account that hasn't
+  //   loaded yet. This is what effectiveGeneratedVocabularyItems below gates
+  //   on, so a refresh in flight or failing can never eject already-cached
+  //   words from wordsInBook.
+  // - generatedVocabularyLoadSucceededForSelectedBook: did the *most recent*
+  //   attempt for this exact book specifically succeed. Used where a stale
+  //   cache must not be trusted — e.g. the auto-trigger below requires a
+  //   fresh confirmed load, not just "we have some cached data from before".
+  // The userId comparison reads authSession?.user.id directly (not
+  // currentUserIdRef) precisely because this is computed at render time: an
+  // account switch invalidates both flags on the very first render after
+  // authSession changes, without waiting for the account-change reset
+  // effect below to actually run. Without it, switching accounts while
+  // staying on the same word book would keep reporting the *previous*
+  // account's cache as available/succeeded for one render frame, since
+  // loadedGeneratedVocabularyWordBookId alone would still match.
+  const generatedVocabularyAvailableForSelectedBook =
+    selectedWordBookId !== null &&
+    loadedGeneratedVocabularyWordBookId === selectedWordBookId &&
+    loadedGeneratedVocabularyUserId === (authSession?.user.id ?? null);
+  const generatedVocabularyLoadSucceededForSelectedBook =
+    generatedVocabularyLoadState === 'loaded' && generatedVocabularyAvailableForSelectedBook;
+  const generatedVocabularyErrorForSelectedBook =
+    generatedVocabularyLoadState === 'error' &&
+    selectedWordBookId !== null &&
+    generatedVocabularyErrorWordBookId === selectedWordBookId;
+
+  // Same cache-vs-attempt-status split as above, including the userId
+  // comparison, for the expansion setting.
+  const expansionSettingAvailableForSelectedBook =
+    selectedWordBookId !== null &&
+    loadedExpansionSettingWordBookId === selectedWordBookId &&
+    loadedExpansionSettingUserId === (authSession?.user.id ?? null);
+  const expansionSettingLoadSucceededForSelectedBook =
+    expansionSettingLoadState === 'loaded' && expansionSettingAvailableForSelectedBook;
+  const expansionSettingErrorForSelectedBook =
+    expansionSettingLoadState === 'error' &&
+    selectedWordBookId !== null &&
+    expansionSettingErrorWordBookId === selectedWordBookId;
+
   // Every dataset needed to actually study must be in before the panel or
   // an active session can render — a book list without its vocabulary (or
   // vice versa) would show wrong or empty counts instead of a real error.
+  // Deliberately does NOT require the generated-words or expansion-setting
+  // fetches to have succeeded: AI expansion is an enhancement on top of the
+  // base 500-word catalog, never a hard dependency for ordinary Learn/Review.
   const dataReady =
     wordBooksLoadState === 'loaded' &&
     wordBooksState.length > 0 &&
@@ -412,18 +682,64 @@ export default function LearnScreen() {
     vocabularyLoadedForSelectedBook &&
     selectedWordBook !== undefined;
 
-  const masteredCount = wordsInBook.filter(
+  // Gated on *availability* (the cache marker), not on the most recent
+  // attempt having succeeded — this is exactly what keeps already-loaded
+  // generated words merged into wordsInBook while a refresh is loading or
+  // has failed. See generatedVocabularyAvailableForSelectedBook's comment.
+  const effectiveGeneratedVocabularyItems = generatedVocabularyAvailableForSelectedBook
+    ? generatedVocabularyItems
+    : [];
+
+  // Base words first, generated words after — the single merged list every
+  // existing Learn/Review derivation below reads, so the scheduler itself
+  // never needs to know two sources exist.
+  const wordsInBook = useMemo(
+    () => [...baseVocabularyItems, ...effectiveGeneratedVocabularyItems],
+    [baseVocabularyItems, effectiveGeneratedVocabularyItems],
+  );
+
+  const baseWordIdSet = useMemo(() => new Set(baseVocabularyItems.map((item) => item.id)), [baseVocabularyItems]);
+  const generatedWordIdSet = useMemo(
+    () => new Set(effectiveGeneratedVocabularyItems.map((item) => item.id)),
+    [effectiveGeneratedVocabularyItems],
+  );
+
+  // Only ever covers the currently selected book's vocabulary — Learn and
+  // Review sessions never reference a word from any other book, so this
+  // never needs to be a global, all-books lookup.
+  const vocabularyById = useMemo(() => new Map(wordsInBook.map((item) => [item.id, item])), [wordsInBook]);
+
+  // The base progress percentage and "has the user finished the base
+  // catalog" gate are both anchored to baseVocabularyItems specifically —
+  // never wordsInBook — so generating (or later studying) AI words can
+  // never move this number. See section three of the spec: 500/500 stays
+  // 100% however many expansion words exist alongside it.
+  const baseMasteredCount = baseVocabularyItems.filter(
     (item) => progressByItemId[item.id]?.status === 'mastered',
   ).length;
 
-  // Display-only derived value (a rounded percentage of masteredCount /
-  // wordsInBook.length) — no new business meaning, purely how the existing
-  // ratio is presented on the progress bar/label.
-  const masteredPercent =
-    wordsInBook.length > 0 ? Math.round((masteredCount / wordsInBook.length) * 100) : 0;
+  // Display-only derived value (a rounded percentage of baseMasteredCount /
+  // baseVocabularyItems.length) — no new business meaning, purely how the
+  // existing ratio is presented on the progress bar/label.
+  const baseMasteredPercent =
+    baseVocabularyItems.length > 0 ? Math.round((baseMasteredCount / baseVocabularyItems.length) * 100) : 0;
 
   // New-word definition: no progress row at all (our own writes never save
-  // status 'new', so this is effectively "never studied").
+  // status 'new', so this is effectively "never studied"). Scoped to the
+  // base catalog only — this is "has the base 500 all entered learning",
+  // the same rule the Edge Function itself uses to decide base_incomplete,
+  // and it deliberately does not require mastery or an empty Review queue.
+  const baseNewWordIds = useMemo(
+    () => baseVocabularyItems.filter((item) => isNewWord(progressByItemId[item.id])).map((item) => item.id),
+    [baseVocabularyItems, progressByItemId],
+  );
+  // Guarded by dataReady so an empty baseVocabularyItems array *before* it
+  // has actually loaded can never look like "already fully studied".
+  const isBaseFullyStudied = dataReady && baseNewWordIds.length === 0;
+
+  // New-word definition for actually starting a Learn group: base and
+  // generated new words combined — AI expansion words flow through the
+  // exact same scheduler, never a second algorithm.
   const newWordIds = useMemo(
     () => wordsInBook.filter((item) => isNewWord(progressByItemId[item.id])).map((item) => item.id),
     [wordsInBook, progressByItemId],
@@ -567,7 +883,7 @@ export default function LearnScreen() {
   // overwriting the vocabulary of the book now selected.
   useEffect(() => {
     if (!selectedWordBookId) {
-      setWordsInBook([]);
+      setBaseVocabularyItems([]);
       setLoadedVocabularyWordBookId(null);
       setVocabularyErrorWordBookId(null);
       return;
@@ -580,7 +896,7 @@ export default function LearnScreen() {
     fetchVocabularyByWordBookId(requestedWordBookId)
       .then((items) => {
         if (vocabularyRequestTokenRef.current !== requestToken) return;
-        setWordsInBook(items);
+        setBaseVocabularyItems(items);
         setLoadedVocabularyWordBookId(requestedWordBookId);
         setVocabularyErrorWordBookId(null);
         setVocabularyLoadState('loaded');
@@ -591,6 +907,164 @@ export default function LearnScreen() {
         setVocabularyLoadState('error');
       });
   }, [selectedWordBookId, vocabularyRetryToken]);
+
+  // A different signed-in user (or sign-out) must never inherit the
+  // previous user's private AI-expansion data, in-flight request, or
+  // per-day attempt bookkeeping. Runs before the two fetch effects below
+  // (declared first, and React runs effects in declaration order), so by
+  // the time they see the new authSession?.user.id, currentUserIdRef is
+  // already updated and every piece of stale expansion state is cleared.
+  useEffect(() => {
+    const userId = authSession?.user.id ?? null;
+    currentUserIdRef.current = userId;
+
+    generatedVocabularyRequestTokenRef.current += 1;
+    expansionSettingRequestTokenRef.current += 1;
+    expansionRequestTokenRef.current += 1;
+    expansionInFlightRef.current = null;
+    expansionSettingSaveOwnerRef.current = null;
+    cancelExpansionRecheck();
+
+    setGeneratedVocabularyItems([]);
+    setLoadedGeneratedVocabularyWordBookId(null);
+    setLoadedGeneratedVocabularyUserId(null);
+    setGeneratedVocabularyErrorWordBookId(null);
+    setGeneratedVocabularyLoadState('loading');
+
+    setExpansionSettingEnabled(false);
+    setLoadedExpansionSettingWordBookId(null);
+    setLoadedExpansionSettingUserId(null);
+    setExpansionSettingErrorWordBookId(null);
+    setExpansionSettingLoadState('loading');
+
+    setIsRequestingExpansion(false);
+    setIsExpansionInProgress(false);
+    setIsExpansionBacklogRemaining(false);
+    setExpansionGenerationError(null);
+    setExpansionToggleError(null);
+    setIsExpansionSettingSaving(false);
+    setDismissedExpansionCard(false);
+
+    // Keys already embed userId, so a different user's old keys are
+    // already inert for the new user — pruned here (rather than left to
+    // accumulate forever across sign-outs) so this Set doesn't grow
+    // unbounded over a long-lived app session with multiple accounts.
+    if (userId) {
+      const currentUserPrefix = `${userId}:`;
+      for (const key of autoExpansionAttemptedKeysRef.current) {
+        if (!key.startsWith(currentUserPrefix)) {
+          autoExpansionAttemptedKeysRef.current.delete(key);
+        }
+      }
+    } else {
+      autoExpansionAttemptedKeysRef.current.clear();
+    }
+  }, [authSession?.user.id, cancelExpansionRecheck]);
+
+  // Loads the current user's own AI-generated words for the selected book.
+  // Same request-token/word-book-tagging shape as the base vocabulary fetch
+  // above, plus an explicit userId check: a slow fetch from a since-signed-
+  // out (or switched) account must never write into the current account's
+  // page state, even if it happens to resolve after the account-change
+  // effect above already reset everything. loadedGeneratedVocabularyWordBookId
+  // is deliberately left untouched on failure (see the catch branch) — it
+  // is the "do we hold a trustworthy cache" marker, and a failed refresh
+  // must never erase an already-successful load; only a genuine account or
+  // word-book switch (handled by the effects above) clears it.
+  useEffect(() => {
+    const userId = authSession?.user.id;
+    if (!userId || !selectedWordBookId) {
+      setGeneratedVocabularyItems([]);
+      setLoadedGeneratedVocabularyWordBookId(null);
+      setLoadedGeneratedVocabularyUserId(null);
+      setGeneratedVocabularyErrorWordBookId(null);
+      return;
+    }
+
+    const requestToken = (generatedVocabularyRequestTokenRef.current += 1);
+    const requestedUserId = userId;
+    const requestedWordBookId = selectedWordBookId;
+    setGeneratedVocabularyLoadState('loading');
+
+    fetchGeneratedVocabularyByWordBookId(requestedWordBookId)
+      .then((items) => {
+        if (
+          generatedVocabularyRequestTokenRef.current !== requestToken ||
+          currentUserIdRef.current !== requestedUserId ||
+          selectedWordBookIdRef.current !== requestedWordBookId
+        ) {
+          return;
+        }
+        setGeneratedVocabularyItems(items);
+        setLoadedGeneratedVocabularyWordBookId(requestedWordBookId);
+        setLoadedGeneratedVocabularyUserId(requestedUserId);
+        setGeneratedVocabularyErrorWordBookId(null);
+        setGeneratedVocabularyLoadState('loaded');
+      })
+      .catch(() => {
+        if (
+          generatedVocabularyRequestTokenRef.current !== requestToken ||
+          currentUserIdRef.current !== requestedUserId ||
+          selectedWordBookIdRef.current !== requestedWordBookId
+        ) {
+          return;
+        }
+        setGeneratedVocabularyErrorWordBookId(requestedWordBookId);
+        setGeneratedVocabularyLoadState('error');
+      });
+  }, [authSession?.user.id, selectedWordBookId, generatedVocabularyRetryToken]);
+
+  // Loads whether the current user has AI daily expansion enabled for the
+  // selected book. A missing row (never opted in yet) resolves to false via
+  // fetchVocabularyExpansionSetting itself — this effect only distinguishes
+  // "loaded" from "still loading" / "failed to load". Same cache-preserving
+  // behavior on failure as the generated-vocabulary effect above:
+  // loadedExpansionSettingWordBookId and the last-known expansionSettingEnabled
+  // are left untouched by the catch branch, so a failed refresh shows an
+  // error+retry without silently reverting a known "enabled" state to
+  // "disabled". expansionSettingRetryToken lets the dedicated retry button
+  // (shown when there is no trustworthy cache at all) force a fresh attempt.
+  useEffect(() => {
+    const userId = authSession?.user.id;
+    if (!userId || !selectedWordBookId) {
+      setLoadedExpansionSettingWordBookId(null);
+      setLoadedExpansionSettingUserId(null);
+      setExpansionSettingErrorWordBookId(null);
+      return;
+    }
+
+    const requestToken = (expansionSettingRequestTokenRef.current += 1);
+    const requestedUserId = userId;
+    const requestedWordBookId = selectedWordBookId;
+    setExpansionSettingLoadState('loading');
+
+    fetchVocabularyExpansionSetting(requestedWordBookId)
+      .then((enabled) => {
+        if (
+          expansionSettingRequestTokenRef.current !== requestToken ||
+          currentUserIdRef.current !== requestedUserId ||
+          selectedWordBookIdRef.current !== requestedWordBookId
+        ) {
+          return;
+        }
+        setExpansionSettingEnabled(enabled);
+        setLoadedExpansionSettingWordBookId(requestedWordBookId);
+        setLoadedExpansionSettingUserId(requestedUserId);
+        setExpansionSettingErrorWordBookId(null);
+        setExpansionSettingLoadState('loaded');
+      })
+      .catch(() => {
+        if (
+          expansionSettingRequestTokenRef.current !== requestToken ||
+          currentUserIdRef.current !== requestedUserId ||
+          selectedWordBookIdRef.current !== requestedWordBookId
+        ) {
+          return;
+        }
+        setExpansionSettingErrorWordBookId(requestedWordBookId);
+        setExpansionSettingLoadState('error');
+      });
+  }, [authSession?.user.id, selectedWordBookId, expansionSettingRetryToken]);
 
   // Loads remote progress once a session is available. Also resets every
   // piece of active-session state back to the control panel: a different
@@ -722,6 +1196,18 @@ export default function LearnScreen() {
     setSaveError(null);
     setRestartError(null);
     refreshReviewNow();
+    // A pending delayed recheck belongs to the book being left — it must
+    // never fire (and possibly re-trigger a UI update) for a book the user
+    // has already navigated away from.
+    cancelExpansionRecheck();
+    // Per-book transient AI-expansion display state — never carried over to
+    // whichever book is selected next. The underlying data fetches (and
+    // their own loaded-for-this-book flags) are handled by their own effects.
+    setDismissedExpansionCard(false);
+    setIsExpansionInProgress(false);
+    setIsExpansionBacklogRemaining(false);
+    setExpansionGenerationError(null);
+    setExpansionToggleError(null);
   };
 
   const handleToggleBookmark = async () => {
@@ -977,6 +1463,388 @@ export default function LearnScreen() {
     ]);
   };
 
+  // The one place that calls generate-vocabulary-expansion, shared by the
+  // auto-trigger effect, the "开启" flow, the manual "重试"/"刷新状态"
+  // button, and the one-shot generation_in_progress recheck — so there is
+  // exactly one implementation of "start a request, apply its result,
+  // discard it if stale" rather than a copy per call site. Guarded so only
+  // one expansion request is ever in flight at a time, globally.
+  //
+  // `source` distinguishes a delayed recheck from a fresh auto/manual
+  // attempt: only a fresh attempt is allowed to schedule *another* recheck
+  // if it, too, comes back generation_in_progress — a recheck can never
+  // schedule a further recheck, which is what actually caps polling at one
+  // extra check instead of an unbounded chain.
+  const runExpansionRequest = useCallback(
+    async (wordBookId: string, source: 'auto' | 'manual' | 'delayed-recheck') => {
+      const requestedUserId = currentUserIdRef.current;
+      if (!requestedUserId) {
+        return;
+      }
+      if (!isAppActiveRef.current) {
+        return;
+      }
+      if (expansionInFlightRef.current !== null) {
+        return;
+      }
+
+      // Recorded synchronously, before the request is even sent, so the
+      // focus-driven auto-trigger effect can never fire a second time for
+      // this same user/book/day even if it re-evaluates while this request
+      // is still in flight.
+      const utcDate = new Date().toISOString().slice(0, 10);
+      autoExpansionAttemptedKeysRef.current.add(`${requestedUserId}:${wordBookId}:${utcDate}`);
+
+      const requestToken = (expansionRequestTokenRef.current += 1);
+      expansionInFlightRef.current = { userId: requestedUserId, wordBookId, requestToken };
+      setIsRequestingExpansion(true);
+
+      // A result only gets applied to book-specific display state when
+      // this is still the newest request, for the same account, and the
+      // user hasn't since switched to a different book — a stale or
+      // now-irrelevant result is silently discarded rather than ever
+      // overwriting what's currently shown (e.g. a different account's
+      // data, or a book the user has navigated away from).
+      const stillRelevant = () =>
+        expansionRequestTokenRef.current === requestToken &&
+        currentUserIdRef.current === requestedUserId &&
+        selectedWordBookIdRef.current === wordBookId;
+
+      if (stillRelevant()) {
+        setExpansionGenerationError(null);
+        setIsExpansionBacklogRemaining(false);
+        setIsExpansionInProgress(false);
+      }
+
+      try {
+        const response = await requestVocabularyExpansion(wordBookId);
+
+        if (response.status === 'disabled') {
+          // Not an error — the server-side setting disagrees with what this
+          // page has locally (e.g. paused from another device); sync to it.
+          if (stillRelevant()) {
+            setExpansionSettingEnabled(false);
+          }
+          return;
+        }
+
+        if (response.status === 'base_incomplete') {
+          // Not an error — nothing to show here; the base progress card
+          // already reflects this on its own.
+          return;
+        }
+
+        if (response.status === 'backlog_remaining') {
+          if (stillRelevant()) {
+            setIsExpansionBacklogRemaining(true);
+          }
+          return;
+        }
+
+        if (response.status === 'generation_in_progress') {
+          if (stillRelevant()) {
+            setIsExpansionInProgress(true);
+            if (source !== 'delayed-recheck') {
+              scheduleExpansionRecheck(requestedUserId, wordBookId);
+            }
+          }
+          return;
+        }
+
+        // generated / already_generated: the response's own items are never
+        // trusted as the page's data source — re-querying the database is
+        // what actually updates generatedVocabularyItems.
+        const refreshedItems = await fetchGeneratedVocabularyByWordBookId(wordBookId);
+        if (stillRelevant()) {
+          setGeneratedVocabularyItems(refreshedItems);
+          setLoadedGeneratedVocabularyWordBookId(wordBookId);
+          setLoadedGeneratedVocabularyUserId(requestedUserId);
+          setGeneratedVocabularyErrorWordBookId(null);
+          setGeneratedVocabularyLoadState('loaded');
+          setIsExpansionBacklogRemaining(false);
+          setIsExpansionInProgress(false);
+          setExpansionGenerationError(null);
+        }
+      } catch {
+        if (stillRelevant()) {
+          setExpansionGenerationError('扩展词准备失败，请稍后重试。');
+        }
+      } finally {
+        // Ownership check, not stillRelevant(): expansionInFlightRef can be
+        // forcibly cleared out from under this call by the account-change
+        // reset effect (it cannot cancel this in-flight await, only stop
+        // trusting its result), which lets a *new* request for a different
+        // account/book claim the slot while this one is still winding down.
+        // If that happened, expansionInFlightRef.current now belongs to
+        // that newer request — this call must touch neither the ref nor
+        // isRequestingExpansion, or it would clear the newer request's
+        // genuinely-still-in-flight loading state out from under it (and
+        // isRequestingExpansion is a single boolean shared across every
+        // account/book, not scoped to this one call).
+        //
+        // Compares requestToken, not (userId, wordBookId): if the same user
+        // signs out and back in and starts a new request for the same word
+        // book, the new request's userId and wordBookId are identical to
+        // this (old, still in-flight) call's — a userId+wordBookId
+        // comparison alone would match by coincidence and incorrectly clear
+        // the newer request's slot. requestToken gives every call, even one
+        // with an otherwise-identical userId/wordBookId pair, its own unique
+        // identity, so only the call that actually owns this exact slot ever
+        // clears it.
+        if (expansionInFlightRef.current !== null && expansionInFlightRef.current.requestToken === requestToken) {
+          expansionInFlightRef.current = null;
+          setIsRequestingExpansion(false);
+        }
+      }
+    },
+    // Intentionally stable (no reactive dependencies): every value it reads
+    // that could change over time is read through a ref at call time
+    // instead, so this identity never needs to change across renders.
+    [],
+  );
+
+  // At most one pending timer — a second call while one is already
+  // scheduled is a no-op, never a stacked/repeating timer. Combined with
+  // runExpansionRequest's source check above, this is what caps
+  // generation_in_progress polling at exactly one extra recheck, never an
+  // unbounded chain: only a fresh auto/manual attempt schedules a recheck,
+  // and the recheck itself always passes source: 'delayed-recheck', which
+  // is forbidden from scheduling another.
+  const scheduleExpansionRecheck = useCallback(
+    (userId: string, wordBookId: string) => {
+      if (expansionRecheckTimeoutRef.current !== null) {
+        return;
+      }
+      expansionRecheckTimeoutRef.current = setTimeout(() => {
+        expansionRecheckTimeoutRef.current = null;
+        // Every value here is read fresh from a ref, never a closed-over
+        // variable, so this can't act on a stale userId/wordBookId/enabled
+        // value from whenever the timer was originally scheduled.
+        if (
+          isAppActiveRef.current &&
+          screenModeRef.current === 'panel' &&
+          currentUserIdRef.current === userId &&
+          selectedWordBookIdRef.current === wordBookId &&
+          expansionSettingEnabledRef.current &&
+          expansionInFlightRef.current === null
+        ) {
+          void runExpansionRequest(wordBookId, 'delayed-recheck');
+        }
+      }, EXPANSION_RECHECK_DELAY_MS);
+    },
+    [runExpansionRequest],
+  );
+
+  // Cancels a pending one-shot recheck on unmount, so it can never fire (and
+  // call setState) after this screen is gone.
+  useEffect(() => {
+    return () => {
+      cancelExpansionRecheck();
+    };
+  }, [cancelExpansionRecheck]);
+
+  // Auto-trigger: re-evaluated every time this screen regains focus, or
+  // whenever any of its own dependencies change while already focused
+  // (useFocusEffect re-invokes its callback on either) — including the app
+  // returning to the active state. Actually starting a request is still
+  // gated by autoExpansionAttemptedKeysRef, which is what guarantees at
+  // most one automatic attempt per signed-in user, per word book, per UTC
+  // calendar day — no matter how many times this re-runs.
+  useFocusEffect(
+    useCallback(() => {
+      if (!isAppActive) return;
+      if (screenMode !== 'panel') return;
+      const userId = authSession?.user.id;
+      if (!userId || !selectedWordBookId) return;
+      if (!dataReady) return;
+      if (!generatedVocabularyLoadSucceededForSelectedBook) return;
+      if (!expansionSettingLoadSucceededForSelectedBook) return;
+      if (!expansionSettingEnabled) return;
+      if (!isBaseFullyStudied) return;
+      if (expansionInFlightRef.current !== null) return;
+
+      const utcDate = new Date().toISOString().slice(0, 10);
+      const attemptKey = `${userId}:${selectedWordBookId}:${utcDate}`;
+      if (autoExpansionAttemptedKeysRef.current.has(attemptKey)) return;
+
+      void runExpansionRequest(selectedWordBookId, 'auto');
+    }, [
+      isAppActive,
+      screenMode,
+      authSession?.user.id,
+      selectedWordBookId,
+      dataReady,
+      generatedVocabularyLoadSucceededForSelectedBook,
+      expansionSettingLoadSucceededForSelectedBook,
+      expansionSettingEnabled,
+      isBaseFullyStudied,
+      isRequestingExpansion,
+      runExpansionRequest,
+    ]),
+  );
+
+  const handleEnableExpansion = async () => {
+    if (!selectedWordBookId || isExpansionSettingSaving) return;
+    if (!isAppActiveRef.current) return;
+    const requestedUserId = currentUserIdRef.current;
+    if (!requestedUserId) return;
+    const requestedWordBookId = selectedWordBookId;
+
+    // Claims the save slot for this exact call. Only this call may clear
+    // isExpansionSettingSaving/the slot below — if a newer call has since
+    // claimed it (e.g. after an account switch, or the same user signing
+    // out and back in and saving the same book again, let a new save start
+    // while this one was still awaiting the network), this call's
+    // completion must leave that newer save's loading state alone rather
+    // than resetting it early and risking a duplicate submit. operationId
+    // (not userId/wordBookId) is what's actually compared, since a
+    // same-user re-login can produce two calls with an identical
+    // userId/wordBookId pair.
+    const operationId = (expansionSettingSaveOperationIdRef.current += 1);
+    expansionSettingSaveOwnerRef.current = { userId: requestedUserId, wordBookId: requestedWordBookId, operationId };
+    const ownsSaveSlot = () => expansionSettingSaveOwnerRef.current?.operationId === operationId;
+
+    setIsExpansionSettingSaving(true);
+    setExpansionToggleError(null);
+
+    try {
+      await setVocabularyExpansionEnabled(requestedWordBookId, true);
+    } catch {
+      if (currentUserIdRef.current === requestedUserId && selectedWordBookIdRef.current === requestedWordBookId) {
+        setExpansionToggleError('开启失败，请稍后重试。');
+      }
+      if (ownsSaveSlot()) {
+        expansionSettingSaveOwnerRef.current = null;
+        setIsExpansionSettingSaving(false);
+      }
+      return;
+    }
+
+    // The save itself already succeeded in the database regardless of what
+    // happens below — only whether *this page* reflects it, and whether it
+    // goes on to call the Edge Function, depends on the user still being on
+    // this exact account/book/panel.
+    const stillRelevant =
+      currentUserIdRef.current === requestedUserId &&
+      selectedWordBookIdRef.current === requestedWordBookId &&
+      screenModeRef.current === 'panel';
+
+    if (stillRelevant) {
+      setExpansionSettingEnabled(true);
+    }
+    if (ownsSaveSlot()) {
+      expansionSettingSaveOwnerRef.current = null;
+      setIsExpansionSettingSaving(false);
+    }
+
+    // If the user has since switched account, word book, or left the panel,
+    // never call the Edge Function for the book/account they opened this
+    // from — and never let its (nonexistent) result reach the UI. Returning
+    // to this word book later re-evaluates via the normal setting fetch
+    // (now correctly reading is_enabled=true) and the auto-trigger effect.
+    if (stillRelevant) {
+      void runExpansionRequest(requestedWordBookId, 'manual');
+    }
+  };
+
+  const handlePauseExpansion = async () => {
+    if (!selectedWordBookId || isExpansionSettingSaving) return;
+    if (!isAppActiveRef.current) return;
+    const requestedUserId = currentUserIdRef.current;
+    if (!requestedUserId) return;
+    const requestedWordBookId = selectedWordBookId;
+
+    // A pause always cancels any pending delayed recheck for the book being
+    // paused — there is no point rechecking generation status for a book
+    // the user just asked to stop expanding.
+    cancelExpansionRecheck();
+
+    // Same save-slot ownership as handleEnableExpansion above.
+    const operationId = (expansionSettingSaveOperationIdRef.current += 1);
+    expansionSettingSaveOwnerRef.current = { userId: requestedUserId, wordBookId: requestedWordBookId, operationId };
+    const ownsSaveSlot = () => expansionSettingSaveOwnerRef.current?.operationId === operationId;
+
+    setIsExpansionSettingSaving(true);
+    setExpansionToggleError(null);
+
+    try {
+      await setVocabularyExpansionEnabled(requestedWordBookId, false);
+    } catch {
+      if (currentUserIdRef.current === requestedUserId && selectedWordBookIdRef.current === requestedWordBookId) {
+        setExpansionToggleError('暂停失败，请稍后重试。');
+      }
+      if (ownsSaveSlot()) {
+        expansionSettingSaveOwnerRef.current = null;
+        setIsExpansionSettingSaving(false);
+      }
+      return;
+    }
+
+    if (currentUserIdRef.current === requestedUserId && selectedWordBookIdRef.current === requestedWordBookId) {
+      setExpansionSettingEnabled(false);
+    }
+    if (ownsSaveSlot()) {
+      expansionSettingSaveOwnerRef.current = null;
+      setIsExpansionSettingSaving(false);
+    }
+  };
+
+  const handleDismissExpansionCard = () => {
+    setDismissedExpansionCard(true);
+  };
+
+  // Bypasses autoExpansionAttemptedKeysRef entirely — a manual retry/refresh
+  // must always be able to fire regardless of whether today's automatic
+  // attempt already happened (runExpansionRequest's own in-flight guard is
+  // still the only thing that can block it). Also used as the "刷新状态"
+  // action once a generation_in_progress recheck has already happened once —
+  // tapping it starts a genuinely new 'manual' attempt, which is itself
+  // allowed one more delayed recheck if it, too, comes back in-progress.
+  const handleRetryExpansion = () => {
+    if (!selectedWordBookId) return;
+    if (!isAppActiveRef.current) return;
+    void runExpansionRequest(selectedWordBookId, 'manual');
+  };
+
+  const isGeneratingSelectedExpansion =
+    isRequestingExpansion &&
+    expansionInFlightRef.current !== null &&
+    expansionInFlightRef.current.userId === authSession?.user.id &&
+    expansionInFlightRef.current.wordBookId === selectedWordBookId;
+
+  // The main opt-in/status card shows as soon as there is a *trustworthy
+  // cache* for both the generated words and the setting (available, not
+  // necessarily the latest attempt having succeeded) — this is what keeps
+  // it visible (showing the last-known enabled state) while a background
+  // refresh is failing, per generatedVocabularyAvailableForSelectedBook and
+  // expansionSettingAvailableForSelectedBook above.
+  const showExpansionCard =
+    screenMode === 'panel' &&
+    isBaseFullyStudied &&
+    generatedVocabularyAvailableForSelectedBook &&
+    expansionSettingAvailableForSelectedBook &&
+    (expansionSettingEnabled || !dismissedExpansionCard);
+
+  // A dedicated, blocking error card for when the *setting itself* has never
+  // successfully loaded for this book — shown instead of (never alongside)
+  // showExpansionCard, since without knowing the real on/off state there is
+  // nothing trustworthy to render as an opt-in/status card.
+  const showExpansionSettingErrorCard =
+    screenMode === 'panel' &&
+    isBaseFullyStudied &&
+    !expansionSettingAvailableForSelectedBook &&
+    expansionSettingErrorForSelectedBook;
+
+  // Same idea for the generated-word list itself, but only once the setting
+  // is known — otherwise the setting error card above already explains why
+  // nothing else can render yet.
+  const showGeneratedVocabularyErrorCard =
+    screenMode === 'panel' &&
+    isBaseFullyStudied &&
+    expansionSettingAvailableForSelectedBook &&
+    !generatedVocabularyAvailableForSelectedBook &&
+    generatedVocabularyErrorForSelectedBook;
+
   const learnSummaryIsPaused =
     learnSession !== null &&
     learnSession.endReason !== 'completed-target' &&
@@ -1098,12 +1966,148 @@ export default function LearnScreen() {
             </Text>
             <View style={styles.wordBookStatsRow}>
               <Text style={styles.wordBookStatsText}>
-                已掌握 {masteredCount} / {wordsInBook.length}
+                已掌握 {baseMasteredCount} / {baseVocabularyItems.length}
               </Text>
-              <Text style={styles.wordBookStatsPercent}>{masteredPercent}%</Text>
+              <Text style={styles.wordBookStatsPercent}>{baseMasteredPercent}%</Text>
             </View>
-            <ProgressBar ratio={wordsInBook.length > 0 ? masteredCount / wordsInBook.length : 0} />
+            <ProgressBar ratio={baseVocabularyItems.length > 0 ? baseMasteredCount / baseVocabularyItems.length : 0} />
           </View>
+
+          {showExpansionSettingErrorCard && (
+            <View style={styles.expansionCard}>
+              <Text style={styles.expansionErrorText}>每日扩展设置加载失败，请检查网络。</Text>
+              <Pressable
+                onPress={() => setExpansionSettingRetryToken((n) => n + 1)}
+                accessibilityRole="button"
+                accessibilityLabel="重试加载每日扩展设置"
+                style={styles.expansionSecondaryButton}>
+                <Text style={styles.expansionSecondaryButtonText}>重试</Text>
+              </Pressable>
+            </View>
+          )}
+
+          {showGeneratedVocabularyErrorCard && (
+            <View style={styles.expansionCard}>
+              <Text style={styles.expansionErrorText}>扩展词数据加载失败，请检查网络。</Text>
+              <Pressable
+                onPress={() => setGeneratedVocabularyRetryToken((n) => n + 1)}
+                accessibilityRole="button"
+                accessibilityLabel="重试加载扩展词数据"
+                style={styles.expansionSecondaryButton}>
+                <Text style={styles.expansionSecondaryButtonText}>重试</Text>
+              </Pressable>
+            </View>
+          )}
+
+          {showExpansionCard && (
+            <View style={styles.expansionCard}>
+              {(expansionSettingErrorForSelectedBook || generatedVocabularyErrorForSelectedBook) && (
+                <View style={styles.expansionStaleNotice}>
+                  <Text style={styles.expansionErrorText}>
+                    {expansionSettingErrorForSelectedBook
+                      ? '每日扩展设置刷新失败，当前显示的是上次加载的状态。'
+                      : '扩展词数据刷新失败，当前显示的是已缓存的扩展词。'}
+                  </Text>
+                  <Pressable
+                    onPress={() => {
+                      if (expansionSettingErrorForSelectedBook) {
+                        setExpansionSettingRetryToken((n) => n + 1);
+                      }
+                      if (generatedVocabularyErrorForSelectedBook) {
+                        setGeneratedVocabularyRetryToken((n) => n + 1);
+                      }
+                    }}
+                    accessibilityRole="button"
+                    accessibilityLabel="重试刷新每日扩展数据"
+                    style={styles.expansionSecondaryButton}>
+                    <Text style={styles.expansionSecondaryButtonText}>重试</Text>
+                  </Pressable>
+                </View>
+              )}
+
+              {expansionSettingEnabled ? (
+                <>
+                  <Text style={styles.expansionCardTitle}>AI 每日扩展已开启</Text>
+
+                  {isGeneratingSelectedExpansion ? (
+                    <View style={styles.expansionStatusRow}>
+                      <ActivityIndicator size="small" color={COLORS.accent} />
+                      <Text style={styles.expansionCardText}>正在准备今天的20个扩展词…</Text>
+                    </View>
+                  ) : isExpansionInProgress ? (
+                    <Text style={styles.expansionCardText}>正在准备今天的20个扩展词…</Text>
+                  ) : expansionGenerationError ? (
+                    <Text style={styles.expansionErrorText}>{expansionGenerationError}</Text>
+                  ) : isExpansionBacklogRemaining ? (
+                    <Text style={styles.expansionCardText}>学完当前扩展词后，将继续准备下一批。</Text>
+                  ) : null}
+
+                  {expansionToggleError && <Text style={styles.expansionErrorText}>{expansionToggleError}</Text>}
+
+                  <View style={styles.expansionButtonsRow}>
+                    {(expansionGenerationError || (isExpansionInProgress && !isGeneratingSelectedExpansion)) && (
+                      <Pressable
+                        onPress={handleRetryExpansion}
+                        disabled={isGeneratingSelectedExpansion}
+                        accessibilityRole="button"
+                        accessibilityLabel={expansionGenerationError ? '重试准备扩展词' : '刷新扩展词生成状态'}
+                        accessibilityState={{ disabled: isGeneratingSelectedExpansion }}
+                        style={[styles.expansionSecondaryButton, isGeneratingSelectedExpansion && styles.disabledOpacity]}>
+                        <Text style={styles.expansionSecondaryButtonText}>
+                          {expansionGenerationError ? '重试' : '刷新状态'}
+                        </Text>
+                      </Pressable>
+                    )}
+                    <Pressable
+                      onPress={handlePauseExpansion}
+                      disabled={isExpansionSettingSaving || isGeneratingSelectedExpansion}
+                      accessibilityRole="button"
+                      accessibilityLabel="暂停每日扩展"
+                      accessibilityState={{ disabled: isExpansionSettingSaving || isGeneratingSelectedExpansion }}
+                      style={[
+                        styles.expansionSecondaryButton,
+                        (isExpansionSettingSaving || isGeneratingSelectedExpansion) && styles.disabledOpacity,
+                      ]}>
+                      <Text style={styles.expansionSecondaryButtonText}>
+                        {isExpansionSettingSaving ? '正在暂停…' : '暂停每日扩展'}
+                      </Text>
+                    </Pressable>
+                  </View>
+                </>
+              ) : (
+                <>
+                  <Text style={styles.expansionCardTitle}>AI 每日扩展</Text>
+                  <Text style={styles.expansionCardText}>每天最多准备20个新词，上一批学完后才会继续。</Text>
+
+                  {expansionToggleError && <Text style={styles.expansionErrorText}>{expansionToggleError}</Text>}
+
+                  <View style={styles.expansionButtonsRow}>
+                    <Pressable
+                      onPress={handleEnableExpansion}
+                      disabled={isExpansionSettingSaving}
+                      accessibilityRole="button"
+                      accessibilityLabel="开启每日扩展"
+                      accessibilityState={{ disabled: isExpansionSettingSaving }}
+                      style={[styles.expansionPrimaryButton, isExpansionSettingSaving && styles.disabledOpacity]}>
+                      {isExpansionSettingSaving ? (
+                        <ActivityIndicator size="small" color="#fff" />
+                      ) : (
+                        <Text style={styles.expansionPrimaryButtonText}>开启每日扩展</Text>
+                      )}
+                    </Pressable>
+                    <Pressable
+                      onPress={handleDismissExpansionCard}
+                      disabled={isExpansionSettingSaving}
+                      accessibilityRole="button"
+                      accessibilityLabel="暂时不显示每日扩展卡片"
+                      style={styles.expansionDismissButton}>
+                      <Text style={styles.expansionDismissButtonText}>暂时不要</Text>
+                    </Pressable>
+                  </View>
+                </>
+              )}
+            </View>
+          )}
 
           <View style={styles.sessionCard}>
             <Text style={styles.sessionCardTitle}>本次学习</Text>
@@ -1111,7 +2115,7 @@ export default function LearnScreen() {
             <View style={styles.sessionBlock}>
               <Text style={styles.sessionBlockTitle}>Learn 新词与巩固</Text>
 
-              {wordsInBook.length === 0 ? (
+              {baseVocabularyItems.length === 0 ? (
                 <Text style={styles.sessionBlockEmpty}>该词书暂无词条数据，请稍后重试。</Text>
               ) : (
                 newWordIds.length === 0 &&
@@ -1183,6 +2187,7 @@ export default function LearnScreen() {
           </Text>
           <WordCard
             word={currentWord}
+            isGenerated={generatedWordIdSet.has(currentWord.id)}
             progressCurrent={learnSession.completedWordIds.length}
             progressTotal={LEARN_TARGET_COMPLETED}
             progressLabel="完成"
@@ -1273,6 +2278,7 @@ export default function LearnScreen() {
           </Text>
           <WordCard
             word={currentWord}
+            isGenerated={generatedWordIdSet.has(currentWord.id)}
             progressCurrent={reviewSession.reviewedWordIds.length}
             progressTotal={reviewSession.totalCount}
             progressLabel="复习进度"
@@ -1585,6 +2591,98 @@ const styles = StyleSheet.create({
   dangerLinkButtonText: {
     fontSize: 12,
     color: COLORS.danger,
+  },
+  expansionCard: {
+    width: '100%',
+    borderRadius: 16,
+    backgroundColor: COLORS.surface,
+    padding: 18,
+    gap: 8,
+  },
+  expansionCardTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: COLORS.ink,
+  },
+  expansionCardText: {
+    fontSize: 13,
+    color: COLORS.inkSoft,
+  },
+  expansionErrorText: {
+    fontSize: 13,
+    color: COLORS.danger,
+  },
+  expansionStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  expansionStaleNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    borderRadius: 10,
+    backgroundColor: COLORS.grayTrack,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+  },
+  expansionButtonsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginTop: 4,
+  },
+  expansionPrimaryButton: {
+    minHeight: 44,
+    borderRadius: 10,
+    backgroundColor: COLORS.ink,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+    flexGrow: 1,
+  },
+  expansionPrimaryButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  expansionSecondaryButton: {
+    minHeight: 44,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: COLORS.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 14,
+  },
+  expansionSecondaryButtonText: {
+    color: COLORS.accent,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  expansionDismissButton: {
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+  },
+  expansionDismissButtonText: {
+    color: COLORS.gray,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  generatedBadge: {
+    alignSelf: 'flex-start',
+    borderRadius: 6,
+    backgroundColor: COLORS.grayTrack,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  generatedBadgeText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.gray,
   },
   card: {
     width: '100%',
